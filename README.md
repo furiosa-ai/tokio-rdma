@@ -21,7 +21,7 @@ You need the RDMA userspace libraries installed on your system.
 
 On Ubuntu/Debian:
 ```bash
-sudo apt-get install rdma-core
+sudo apt-get install rdma-core libibverbs-dev librdmacm-dev
 ```
 
 ## Installation
