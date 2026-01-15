@@ -1,6 +1,6 @@
 # tokio-rdma
 
-`tokio-rdma` is a high-performance, asynchronous Rust library that provides safe and idiomatic wrappers around `rdma-sys` (libibverbs and librdmacm). It is designed to work seamlessly with the [Tokio](https://tokio.rs) runtime, enabling efficient RDMA operations in async Rust applications.
+`tokio-rdma` is a high-performance, asynchronous Rust library that provides safe and idiomatic wrappers around `rdma-sys` (based on `rdma-core`). It is designed to work seamlessly with the [Tokio](https://tokio.rs) runtime, enabling efficient RDMA operations in async Rust applications.
 
 > **Warning**: This library is currently experimental and intended for research and development purposes.
 
@@ -8,7 +8,7 @@
 
 *   **Async/Await Support**: Fully integrated with Tokio using `AsyncFd` for non-blocking event polling (CQ and CM events).
 *   **Safe Abstractions**: wrappers for `ibv_context`, `ibv_pd`, `ibv_cq`, `ibv_qp`, and `ibv_mr`.
-*   **RDMA Connection Manager (CM)**: Simplify connection establishment (Connect, Accept, Resolve Route/Addr) using `librdmacm`.
+*   **RDMA Connection Manager (CM)**: Simplify connection establishment (Connect, Accept, Resolve Route/Addr) using `rdma-core`.
 *   **Zero-Copy Memory Registration**:
     *   Host Memory
     *   **DMABUF**: Support for `ibv_reg_dmabuf_mr` to register GPU/NPU memory directly.
@@ -21,7 +21,7 @@ You need the RDMA userspace libraries installed on your system.
 
 On Ubuntu/Debian:
 ```bash
-sudo apt-get install libibverbs-dev librdmacm-dev
+sudo apt-get install rdma-core
 ```
 
 ## Installation
@@ -90,7 +90,7 @@ You can also exchange QP/LID information manually via TCP (Out-of-Band) and tran
 The `examples/` directory contains several complete examples:
 
 *   **Basic Send/Recv**: `client.rs` / `server.rs` (Uses TCP for OOB exchange).
-*   **RDMA CM**: `cm_client.rs` / `cm_server.rs` (Uses `librdmacm`).
+*   **RDMA CM**: `cm_client.rs` / `cm_server.rs` (Uses `rdma-core`).
 *   **DMABUF (NPU/GPU)**: `dmabuf_rdma.rs` (Exports DMABUF from a device and registers it).
 *   **P2P Memory**: `p2p_cm_client.rs` (Maps PCI BAR memory and registers it).
 

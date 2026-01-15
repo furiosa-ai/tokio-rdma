@@ -114,6 +114,6 @@ impl Drop for Device {
     }
 }
 
-// Sending Device across threads is generally safe if underlying libibverbs is thread safe (it usually is)
+// Sending Device across threads is generally safe if underlying rdma-core is thread safe (it usually is)
 unsafe impl Send for Device {}
 unsafe impl Sync for Device {}
