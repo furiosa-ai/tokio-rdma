@@ -1,7 +1,9 @@
 use clap::Parser;
-use std::fs::OpenOptions;
 use std::net::SocketAddr;
+use std::os::fd::FromRawFd;
+use std::os::unix::fs::FileExt;
 use std::os::unix::io::AsRawFd;
+use std::{fs::OpenOptions, path::Path};
 use tokio_rdma::{MemoryRegion, RdmaListener};
 
 #[repr(C, packed)]
@@ -26,40 +28,24 @@ struct Args {
     dmabuf_offset: u64,
 
     #[arg(long, default_value_t = 4096)]
-    dmabuf_size: u64,
+    dmabuf_size: usize,
 }
 
-struct FileDescriptor(i32);
-
-impl Drop for FileDescriptor {
-    fn drop(&mut self) {
-        if self.0 >= 0 {
-            unsafe { libc::close(self.0) };
-        }
-    }
+struct DMABuf {
+    raw_fd: i32,
+    offset: u64,
+    size: usize,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
-    let args = Args::parse();
-
-    let addr: SocketAddr = args.addr.parse()?;
-    println!("Binding to {}...", addr);
-    let listener = RdmaListener::bind(addr).await?;
-    println!("Listening...");
-
-    // Pre-export dmabuf if needed
-    let dmabuf_info = if let Some(path) = &args.dmabuf_dev {
-        println!("Using DMABUF from {}", path);
+impl DMABuf {
+    fn new(path: impl AsRef<Path>, offset: u64, size: usize) -> anyhow::Result<Self> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
 
         let mut region = NpuDmabufRegion {
-            offset: args.dmabuf_offset,
-            size: args.dmabuf_size,
+            offset,
+            size: size as u64,
             fd: -1,
         };
-
         let ret = unsafe {
             libc::ioctl(
                 file.as_raw_fd(),
@@ -71,9 +57,49 @@ async fn main() -> anyhow::Result<()> {
             anyhow::bail!("ioctl failed: {}", std::io::Error::last_os_error());
         }
 
-        let fd = region.fd;
-        println!("Exported dmabuf fd: {}", fd);
-        Some((FileDescriptor(fd), args.dmabuf_size))
+        let raw_fd = region.fd;
+        println!("Exported dmabuf fd: {}", raw_fd);
+        Ok(Self {
+            raw_fd,
+            offset,
+            size,
+        })
+    }
+
+    fn mmap(&self) -> anyhow::Result<memmap2::MmapMut> {
+        unsafe {
+            let file = std::fs::File::from_raw_fd(self.raw_fd);
+            Ok(memmap2::MmapOptions::new()
+                .len(self.size as usize)
+                .offset(self.offset)
+                .map_mut(&file)?)
+        }
+    }
+}
+
+impl Drop for DMABuf {
+    fn drop(&mut self) {
+        if self.raw_fd >= 0 {
+            unsafe { libc::close(self.raw_fd) };
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt::init();
+    let mut args = Args::parse();
+
+    let addr: SocketAddr = args.addr.parse()?;
+    println!("Binding to {}...", addr);
+    let listener = RdmaListener::bind(addr).await?;
+    println!("Listening...");
+
+    args.dmabuf_size = 2 << 30;
+
+    // Pre-export dmabuf if needed
+    let maybe_dmabuf = if let Some(path) = &args.dmabuf_dev {
+        Some(DMABuf::new(&path, args.dmabuf_offset, args.dmabuf_size)?)
     } else {
         println!("Using Host Memory");
         None
@@ -83,61 +109,69 @@ async fn main() -> anyhow::Result<()> {
         let stream = listener.accept().await?;
         println!("Accepted connection!");
 
-        let mut mr = if let Some((fd_wrapper, size)) = &dmabuf_info {
+        let mut mr = if let Some(dmabuf) = &maybe_dmabuf {
             let access = rdma_sys::ibv_access_flags::IBV_ACCESS_LOCAL_WRITE.0
-		| rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_READ.0; 
+                | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_READ.0;
             // | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_WRITE.0;
 
             MemoryRegion::register_dmabuf(
                 stream.pd.clone(),
                 0,
-                *size as usize,
-                fd_wrapper.0,
+                dmabuf.size as usize,
+                dmabuf.raw_fd,
                 access as i32,
             )?
         } else {
             MemoryRegion::register(stream.pd.clone(), 1024)?
         };
 
+        let size = if let Some(dmabuf) = &maybe_dmabuf {
+            1 << 30
+        } else {
+            1024
+        };
         // Post recv
+
+        for i in 0..10 {
+            let wr_id = 100 + i;
+            unsafe {
+                stream.qp.post_recv(&mr, 0, size as u32, wr_id)?;
+            }
+        }
+
+        for i in 0..10 {
+            let wc = stream.cq.poll().await?;
+            println!("Recv completed: {} {:?}", wc.wr_id, wc.status);
+        }
+
+        // if let Some(dmabuf) = &maybe_dmabuf {
+        //     dmabuf.offset;
+        //     let dram = std::fs::OpenOptions::new().read(true).write(true).open("/dev/rngd/npu3ch0").unwrap();
+        //     let dram_addr = 0xC0_0000_0000;
+        //     let mut v = vec![0u8; wc.byte_len as usize];
+        //     dram.read_at(&mut v, dram_addr).unwrap();
+
+        //     // let mmap = dmabuf.mmap()?;
+        //     // let msg =
+        //     //     unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, wc.byte_len as usize) };
+        //     // println!(
+        //     //     "Message received in DMABUF: {:?}",
+        //     //     String::from_utf8_lossy(msg)
+        //     // );
+        // } else {
+        //     let msg =
+        //         unsafe { std::slice::from_raw_parts(mr.addr() as *const u8, wc.byte_len as usize) };
+        //     println!("Message: {:?}", String::from_utf8_lossy(msg));
+        // }
+
         unsafe {
-            stream.qp.post_recv(&mr, 0, if dmabuf_info.is_some() { args.dmabuf_size as u32 } else { 1024 }, 100)?;
+            stream.qp.post_send(&mr, 0, size as u32, 200, true)?;
         }
 
         let wc = stream.cq.poll().await?;
         println!(
-            "Received message! status: {:?}, len: {}",
+            "Send message! status: {:?}, len: {}",
             wc.status, wc.byte_len
         );
-
-        if dmabuf_info.is_none() {
-            let msg = unsafe {
-                std::slice::from_raw_parts(mr.addr() as *const u8, wc.byte_len as usize)
-            };
-            println!("Message: {:?}", String::from_utf8_lossy(msg));
-        } else {
-            let (fd_wrapper, size) = dmabuf_info.as_ref().unwrap();
-            let ptr = unsafe {
-                libc::mmap(
-                    std::ptr::null_mut(),
-                    *size as usize,
-                    libc::PROT_READ,
-                    libc::MAP_SHARED,
-                    fd_wrapper.0,
-                    0,
-                )
-            };
-
-            if ptr == libc::MAP_FAILED {
-                eprintln!("mmap failed: {}", std::io::Error::last_os_error());
-            } else {
-                let msg = unsafe {
-                    std::slice::from_raw_parts(ptr as *const u8, wc.byte_len as usize)
-                };
-                println!("Message received in DMABUF: {:?}", String::from_utf8_lossy(msg));
-
-                unsafe { libc::munmap(ptr, *size as usize) };
-            }
-        }
     }
 }

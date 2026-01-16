@@ -18,9 +18,9 @@ impl MemoryRegion {
         len: usize,
         access: i32,
     ) -> Result<Self> {
-        let mr = ibv_reg_mr(pd.pd, addr, len, access);
+        let mr = unsafe { ibv_reg_mr(pd.pd, addr, len, access) };
         if mr.is_null() {
-            let errno = *libc::__errno_location();
+            let errno = unsafe { *libc::__errno_location() };
             return Err(RdmaError::Rdma(format!(
                 "Failed to register external MR: errno {}",
                 errno
@@ -99,11 +99,11 @@ impl MemoryRegion {
 
     // Unsafe access to underlying buffer
     pub unsafe fn as_slice(&self) -> &[u8] {
-        std::slice::from_raw_parts((*self.mr).addr as *const u8, (*self.mr).length)
+        unsafe { std::slice::from_raw_parts((*self.mr).addr as *const u8, (*self.mr).length) }
     }
 
     pub unsafe fn as_mut_slice(&mut self) -> &mut [u8] {
-        std::slice::from_raw_parts_mut((*self.mr).addr as *mut u8, (*self.mr).length)
+        unsafe { std::slice::from_raw_parts_mut((*self.mr).addr as *mut u8, (*self.mr).length) }
     }
 }
 

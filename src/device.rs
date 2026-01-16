@@ -43,7 +43,7 @@ impl DeviceList {
     pub fn print(&self) {
         for i in 0..self.count as usize {
             if let Some(dev) = self.get(i) {
-		println!("{}", dev.name());
+                println!("{}", dev.name());
             }
         }
     }

@@ -2,7 +2,6 @@ use clap::Parser;
 use std::fs::OpenOptions;
 use std::net::SocketAddr;
 use std::os::unix::io::AsRawFd;
-use std::sync::Arc;
 use tokio_rdma::*;
 
 #[repr(C, packed)]
@@ -66,7 +65,10 @@ async fn main() -> anyhow::Result<()> {
     };
 
     if ret != 0 {
-        return Err(anyhow::anyhow!("ioctl NPU_BAR_EXPORT_DMABUF failed: {}. Make sure the driver is loaded and supports dmabuf export.", std::io::Error::last_os_error()));
+        return Err(anyhow::anyhow!(
+            "ioctl NPU_BAR_EXPORT_DMABUF failed: {}. Make sure the driver is loaded and supports dmabuf export.",
+            std::io::Error::last_os_error()
+        ));
     }
 
     let fd = region.fd;
@@ -76,49 +78,20 @@ async fn main() -> anyhow::Result<()> {
         fd, size
     );
 
-    // 2. Setup RDMA Connection Manager
-    let channel = Arc::new(CmEventChannel::new()?);
-    let id = CmId::new(channel.clone())?;
+    // 2. Connect to server
     let server_addr: SocketAddr = args.addr.parse()?;
+    println!("Connecting to {}...", server_addr);
+    let stream = RdmaStream::connect(server_addr).await?;
+    println!("RDMA Connection established!");
 
-    println!("Resolving address to {}...", server_addr);
-    id.resolve_addr(server_addr)?;
-    let event = channel.get_event().await?;
-    if event.event_type() != rdma_sys::rdma_cm_event_type::RDMA_CM_EVENT_ADDR_RESOLVED {
-        anyhow::bail!("Failed to resolve address: {:?}", event.event_type());
-    }
-
-    println!("Resolving route...");
-    id.resolve_route()?;
-    let event = channel.get_event().await?;
-    if event.event_type() != rdma_sys::rdma_cm_event_type::RDMA_CM_EVENT_ROUTE_RESOLVED {
-        anyhow::bail!("Failed to resolve route: {:?}", event.event_type());
-    }
-
-    // 3. Setup RDMA resources
-    let verbs = id.context();
-    let device_raw = unsafe { (*verbs).device };
-    let device = Arc::new(unsafe { Device::from_context(verbs, device_raw) });
-    let pd = ProtectionDomain::new(device.clone())?;
-    let cq = CompletionQueue::new(device.clone(), 10)?;
-
-    let _qp = QueuePair::new_cm(
-        pd.clone(),
-        id.id,
-        QpInitAttr {
-            send_cq: cq.clone(),
-            recv_cq: cq.clone(),
-        },
-    )?;
-
-    // 4. Register the DMABUF Memory Region
+    // 3. Register the DMABUF Memory Region
     let access = rdma_sys::ibv_access_flags::IBV_ACCESS_LOCAL_WRITE.0
         | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_READ.0
         | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_WRITE.0;
 
     println!("Registering dmabuf with RDMA...");
     let mr = MemoryRegion::register_dmabuf(
-        pd.clone(),
+        stream.pd.clone(),
         0, // Offset within the dmabuf
         size as usize,
         fd,
@@ -130,16 +103,6 @@ async fn main() -> anyhow::Result<()> {
         mr.lkey(),
         mr.rkey()
     );
-
-    // 5. Connect
-    println!("Connecting to server...");
-    id.connect()?;
-    let event = channel.get_event().await?;
-    if event.event_type() != rdma_sys::rdma_cm_event_type::RDMA_CM_EVENT_ESTABLISHED {
-        anyhow::bail!("Failed to establish connection: {:?}", event.event_type());
-    }
-
-    println!("RDMA Connection established with DMABUF!");
 
     // Clean up dmabuf fd
     unsafe { libc::close(fd) };

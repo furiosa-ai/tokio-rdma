@@ -1,5 +1,5 @@
 use clap::Parser;
-use libc::{mmap, munmap, MAP_FAILED, MAP_SHARED, PROT_READ, PROT_WRITE};
+use libc::{MAP_FAILED, MAP_SHARED, PROT_READ, PROT_WRITE, mmap, munmap};
 use std::fs::OpenOptions;
 use std::net::SocketAddr;
 use std::os::unix::io::AsRawFd;

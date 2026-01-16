@@ -191,12 +191,12 @@ impl QueuePair {
         len: u32,
         wr_id: u64,
     ) -> Result<()> {
-        let mut sge: ibv_sge = std::mem::zeroed();
+        let mut sge: ibv_sge = unsafe { std::mem::zeroed() };
         sge.addr = mr.addr() + offset;
         sge.length = len;
         sge.lkey = mr.lkey();
 
-        let mut wr: ibv_recv_wr = std::mem::zeroed();
+        let mut wr: ibv_recv_wr = unsafe { std::mem::zeroed() };
         wr.wr_id = wr_id;
         wr.sg_list = &mut sge;
         wr.num_sge = 1;
@@ -204,7 +204,7 @@ impl QueuePair {
 
         let mut bad_wr: *mut ibv_recv_wr = ptr::null_mut();
 
-        let ret = ibv_post_recv(self.qp, &mut wr, &mut bad_wr);
+        let ret = unsafe { ibv_post_recv(self.qp, &mut wr, &mut bad_wr) };
         if ret != 0 {
             return Err(RdmaError::Rdma("Failed to post recv".into()));
         }
@@ -219,12 +219,12 @@ impl QueuePair {
         wr_id: u64,
         signaled: bool,
     ) -> Result<()> {
-        let mut sge: ibv_sge = std::mem::zeroed();
+        let mut sge: ibv_sge = unsafe { std::mem::zeroed() };
         sge.addr = mr.addr() + offset;
         sge.length = len;
         sge.lkey = mr.lkey();
 
-        let mut wr: ibv_send_wr = std::mem::zeroed();
+        let mut wr: ibv_send_wr = unsafe { std::mem::zeroed() };
         wr.wr_id = wr_id;
         wr.sg_list = &mut sge;
         wr.num_sge = 1;
@@ -238,7 +238,7 @@ impl QueuePair {
 
         let mut bad_wr: *mut ibv_send_wr = ptr::null_mut();
 
-        let ret = ibv_post_send(self.qp, &mut wr, &mut bad_wr);
+        let ret = unsafe { ibv_post_send(self.qp, &mut wr, &mut bad_wr) };
         if ret != 0 {
             return Err(RdmaError::Rdma("Failed to post send".into()));
         }
