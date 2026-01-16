@@ -39,6 +39,14 @@ impl DeviceList {
         }
         None
     }
+
+    pub fn print(&self) {
+        for i in 0..self.count as usize {
+            if let Some(dev) = self.get(i) {
+		println!("{}", dev.name());
+            }
+        }
+    }
 }
 
 impl Drop for DeviceList {
@@ -50,6 +58,7 @@ impl Drop for DeviceList {
 pub struct Device {
     pub raw: *mut ibv_device,
     pub context: *mut ibv_context,
+    owned: bool,
 }
 
 impl Device {
@@ -59,11 +68,26 @@ impl Device {
         // Actually, let's open it on creation to ensure it works.
         let context = unsafe { ibv_open_device(raw) };
         // Note: Realistically handle error
-        Self { raw, context }
+        Self {
+            raw,
+            context,
+            owned: true,
+        }
+    }
+
+    /// Creates a Device wrapper around an existing context.
+    /// The context will NOT be closed when this Device is dropped.
+    pub unsafe fn from_context(context: *mut ibv_context, raw: *mut ibv_device) -> Self {
+        Self {
+            raw,
+            context,
+            owned: false,
+        }
     }
 
     pub fn open(name: Option<&str>) -> Result<Arc<Self>> {
         let list = DeviceList::available()?;
+
         let dev = if let Some(n) = name {
             list.find_by_name(n).ok_or(RdmaError::DeviceNotFound)?
         } else {
@@ -108,7 +132,7 @@ impl Device {
 
 impl Drop for Device {
     fn drop(&mut self) {
-        if !self.context.is_null() {
+        if self.owned && !self.context.is_null() {
             unsafe { ibv_close_device(self.context) };
         }
     }

@@ -24,10 +24,8 @@ async fn main() -> anyhow::Result<()> {
     // We need to associate verbs context and PD
     // The CM ID already has the verbs context after bind/listen/request
     let verbs = unsafe { (*client_id_raw).verbs };
-    let device = Arc::new(Device {
-        raw: ptr::null_mut(),
-        context: verbs,
-    }); // Dummy device wrapper
+    let device_raw = unsafe { (*verbs).device };
+    let device = Arc::new(unsafe { Device::from_context(verbs, device_raw) });
 
     let pd = ProtectionDomain::new(device.clone())?;
     let cq = CompletionQueue::new(device.clone(), 10)?;

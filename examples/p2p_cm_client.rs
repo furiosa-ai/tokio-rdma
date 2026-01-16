@@ -27,6 +27,8 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
 
+    DeviceList::available().unwrap().print();
+
     // 1. Open and mmap the P2P device memory
     println!("Opening P2P device: {}", args.path);
     let file = OpenOptions::new().read(true).write(true).open(&args.path)?;
@@ -72,10 +74,12 @@ async fn main() -> anyhow::Result<()> {
 
     // 3. Setup RDMA resources using the verbs context from CM ID
     let verbs = id.context();
-    let device = Arc::new(Device {
-        raw: std::ptr::null_mut(),
-        context: verbs,
-    });
+    let device_raw = unsafe { (*verbs).device };
+
+    let device = Arc::new(unsafe { Device::from_context(verbs, device_raw) });
+
+    println!("Using RDMA device: {}", device.name());
+
     let pd = ProtectionDomain::new(device.clone())?;
     let cq = CompletionQueue::new(device.clone(), 10)?;
 
@@ -93,8 +97,6 @@ async fn main() -> anyhow::Result<()> {
     let access = rdma_sys::ibv_access_flags::IBV_ACCESS_LOCAL_WRITE.0
         | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_READ.0
         | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_WRITE.0;
-
-    // let access = rdma_sys::ibv_access_flags::IBV_ACCESS_LOCAL_WRITE.0;
 
     let mut mr =
         unsafe { MemoryRegion::register_user(pd.clone(), p2p_ptr, args.size, access as i32)? };

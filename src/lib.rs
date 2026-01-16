@@ -5,6 +5,7 @@ pub mod error;
 pub mod mr;
 pub mod pd;
 pub mod qp;
+pub mod stream;
 pub mod utils;
 
 pub use cm::{CmEvent, CmEventChannel, CmId};
@@ -14,3 +15,4 @@ pub use error::RdmaError;
 pub use mr::MemoryRegion;
 pub use pd::ProtectionDomain;
 pub use qp::{QpInitAttr, QueuePair};
+pub use stream::{RdmaListener, RdmaStream};

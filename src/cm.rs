@@ -108,6 +108,26 @@ impl CmId {
         })
     }
 
+    pub unsafe fn from_raw(id: *mut rdma_cm_id, channel: Option<Arc<CmEventChannel>>) -> Self {
+        Self {
+            id,
+            _channel: channel,
+        }
+    }
+
+    pub fn migrate_id(&mut self, channel: Arc<CmEventChannel>) -> Result<()> {
+        let ret = unsafe { rdma_migrate_id(self.id, channel.channel) };
+        if ret != 0 {
+            let errno = unsafe { *libc::__errno_location() };
+            return Err(RdmaError::Rdma(format!(
+                "Failed to migrate ID: {} (errno {})",
+                ret, errno
+            )));
+        }
+        self._channel = Some(channel);
+        Ok(())
+    }
+
     pub fn bind(&self, addr: SocketAddr) -> Result<()> {
         let sockaddr = socket2::SockAddr::from(addr);
         let ret = unsafe { rdma_bind_addr(self.id, sockaddr.as_ptr() as *mut _) };

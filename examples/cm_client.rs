@@ -28,10 +28,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Setup resources
     let verbs = id.context();
-    let device = Arc::new(Device {
-        raw: std::ptr::null_mut(),
-        context: verbs,
-    });
+    let device_raw = unsafe { (*verbs).device };
+    let device = Arc::new(unsafe { Device::from_context(verbs, device_raw) });
     let pd = ProtectionDomain::new(device.clone())?;
     let cq = CompletionQueue::new(device.clone(), 10)?;
 
