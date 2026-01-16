@@ -185,6 +185,7 @@ impl CmId {
         conn_param.responder_resources = 1;
         conn_param.initiator_depth = 1;
         conn_param.retry_count = 7;
+        conn_param.rnr_retry_count = 7;
 
         let ret = unsafe { rdma_connect(self.id, &mut conn_param) };
         if ret != 0 {
@@ -201,6 +202,7 @@ impl CmId {
         let mut conn_param: rdma_conn_param = unsafe { std::mem::zeroed() };
         conn_param.responder_resources = 1;
         conn_param.initiator_depth = 1;
+        conn_param.rnr_retry_count = 7;
 
         let ret = unsafe { rdma_accept(self.id, &mut conn_param) };
         if ret != 0 {
