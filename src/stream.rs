@@ -1,18 +1,31 @@
+use crate::MemoryRegion;
 use crate::cm::{CmEventChannel, CmId};
 use crate::cq::CompletionQueue;
 use crate::device::Device;
 use crate::error::{RdmaError, Result};
 use crate::pd::ProtectionDomain;
 use crate::qp::{QpInitAttr, QueuePair};
-use rdma_sys::rdma_cm_event_type;
+use futures::future::poll_fn;
+use rdma_sys::{ibv_wc, rdma_cm_event_type};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::task::{Poll, Waker};
+use tokio::sync::Mutex;
 
 pub struct RdmaStream {
     pub id: CmId,
     pub qp: Arc<QueuePair>,
     pub pd: Arc<ProtectionDomain>,
     pub cq: Arc<CompletionQueue>,
+    wr_id: AtomicU64,
+    works: Arc<Mutex<HashMap<u64, WorkState>>>,
+}
+
+enum WorkState {
+    Completed(ibv_wc),
+    Waiting(Waker),
 }
 
 impl RdmaStream {
@@ -69,7 +82,71 @@ impl RdmaStream {
             )));
         }
 
-        Ok(Self { id, qp, pd, cq })
+        let wr_id = AtomicU64::new(0);
+        let works = Arc::new(Mutex::new(HashMap::<u64, WorkState>::new()));
+
+        let _handle = {
+            let works = works.clone();
+            let cq = cq.clone();
+            tokio::task::spawn(async move {
+                loop {
+                    match cq.poll().await {
+                        Ok(wc) => {
+                            let mut locked = works.lock().await;
+                            if let Some(e) = locked.remove(&wc.wr_id) {
+                                match e {
+                                    WorkState::Completed(_wc) => panic!(),
+                                    WorkState::Waiting(waker) => {
+                                        waker.wake_by_ref();
+                                        locked.insert(wc.wr_id, WorkState::Completed(wc)).unwrap();
+                                    }
+                                }
+                            } else {
+                                locked.insert(wc.wr_id, WorkState::Completed(wc)).unwrap();
+                            }
+                        }
+
+                        Err(_e) => {
+                            break;
+                        }
+                    }
+                }
+            })
+        };
+
+        Ok(Self {
+            id,
+            qp,
+            pd,
+            cq,
+            wr_id,
+            works,
+        })
+    }
+
+    pub async fn send(&mut self, mr: &MemoryRegion, offset: u64, len: u32) -> Result<ibv_wc> {
+        let wr_id = self
+            .wr_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        unsafe {
+            self.qp.post_send(&mr, offset, len, wr_id, true)?;
+        }
+        let mut locked = self.works.lock().await;
+        let wc = poll_fn(|cx| {
+            if let Some(state) = locked.remove(&wr_id) {
+                match state {
+                    WorkState::Completed(wc) => Poll::Ready(wc),
+                    WorkState::Waiting(waker) => {
+                        panic!("duplicated wr_id")
+                    }
+                }
+            } else {
+                locked.insert(wr_id, WorkState::Waiting(cx.waker().clone()));
+                Poll::Pending
+            }
+        })
+        .await;
+        Ok(wc)
     }
 }
 
@@ -135,11 +212,16 @@ impl RdmaListener {
                     )));
                 }
 
+                let wr_id = AtomicU64::new(0);
+                let works = Arc::new(Mutex::new(HashMap::new()));
+
                 return Ok(RdmaStream {
                     id: client_id,
                     qp,
                     pd,
                     cq,
+                    wr_id,
+                    works,
                 });
             }
         }
