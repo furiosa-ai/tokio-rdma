@@ -1,7 +1,6 @@
 use clap::Parser;
 use std::net::SocketAddr;
 use std::os::fd::FromRawFd;
-use std::os::unix::fs::FileExt;
 use std::os::unix::io::AsRawFd;
 use std::{fs::OpenOptions, path::Path};
 use tokio_rdma::{MemoryRegion, RdmaListener};
@@ -66,6 +65,7 @@ impl DMABuf {
         })
     }
 
+    #[allow(dead_code)]
     fn mmap(&self) -> anyhow::Result<memmap2::MmapMut> {
         unsafe {
             let file = std::fs::File::from_raw_fd(self.raw_fd);
@@ -106,10 +106,10 @@ async fn main() -> anyhow::Result<()> {
     };
 
     loop {
-        let stream = listener.accept().await?;
+        let mut stream = listener.accept().await?;
         println!("Accepted connection!");
 
-        let mut mr = if let Some(dmabuf) = &maybe_dmabuf {
+        let mr = if let Some(dmabuf) = &maybe_dmabuf {
             let access = rdma_sys::ibv_access_flags::IBV_ACCESS_LOCAL_WRITE.0
                 | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_READ.0;
             // | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_WRITE.0;
@@ -125,22 +125,15 @@ async fn main() -> anyhow::Result<()> {
             MemoryRegion::register(stream.pd.clone(), 1024)?
         };
 
-        let size = if let Some(dmabuf) = &maybe_dmabuf {
+        let size = if let Some(_dmabuf) = &maybe_dmabuf {
             1 << 30
         } else {
             1024
         };
         // Post recv
 
-        for i in 0..10 {
-            let wr_id = 100 + i;
-            unsafe {
-                stream.qp.post_recv(&mr, 0, size as u32, wr_id)?;
-            }
-        }
-
-        for i in 0..10 {
-            let wc = stream.cq.poll().await?;
+        for _ in 0..10 {
+            let wc = stream.recv(&mr, 0, size as u32).await?;
             println!("Recv completed: {} {:?}", wc.wr_id, wc.status);
         }
 
@@ -164,11 +157,7 @@ async fn main() -> anyhow::Result<()> {
         //     println!("Message: {:?}", String::from_utf8_lossy(msg));
         // }
 
-        unsafe {
-            stream.qp.post_send(&mr, 0, size as u32, 200, true)?;
-        }
-
-        let wc = stream.cq.poll().await?;
+        let wc = stream.send(&mr, 0, size as u32).await?;
         println!(
             "Send message! status: {:?}, len: {}",
             wc.status, wc.byte_len

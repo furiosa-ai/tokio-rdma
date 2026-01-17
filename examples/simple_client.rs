@@ -48,13 +48,13 @@ async fn main() -> anyhow::Result<()> {
 
     let addr: SocketAddr = args.addr.parse()?;
     println!("Connecting to {}...", addr);
-    let stream = RdmaStream::connect(addr).await?;
+    let mut stream = RdmaStream::connect(addr).await?;
     println!("Connected!");
 
     // Helper to keep the fd alive if needed
     let _dmabuf_fd_guard;
 
-    let mut mr = if let Some(path) = &args.dmabuf_dev {
+    let mr = if let Some(path) = &args.dmabuf_dev {
         println!("Using DMABUF from {}", path);
         let file = OpenOptions::new().read(true).write(true).open(path)?;
 
@@ -114,25 +114,15 @@ async fn main() -> anyhow::Result<()> {
 
     let now = std::time::Instant::now();
 
-    for i in 0..10 {
-        let wr_id = 123 + i;
-        unsafe {
-            stream.qp.post_send(&mr, 0, len, wr_id, true)?;
-        }
-    }
-
-    for i in 0..10 {
-        let wc = stream.cq.poll().await?;
+    for _ in 0..10 {
+        let wc = stream.send(&mr, 0, len).await?;
         println!("Send completed: {} {:?}", wc.wr_id, wc.status);
     }
 
     let elapsed = now.elapsed();
     println!("for {}ms", elapsed.as_millis());
 
-    unsafe {
-        stream.qp.post_recv(&mr, 0, len, 456)?;
-    }
-    let wc = stream.cq.poll().await?;
+    let wc = stream.recv(&mr, 0, len).await?;
 
     let elapsed = now.elapsed();
     println!(
