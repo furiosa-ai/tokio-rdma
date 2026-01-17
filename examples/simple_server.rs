@@ -130,10 +130,13 @@ async fn main() -> anyhow::Result<()> {
         } else {
             1024
         };
-        // Post recv
+        // Post recv concurrently
 
-        for _ in 0..10 {
-            let wc = stream.recv(&mr, 0, size as u32).await?;
+        let futures = (0..10).map(|_| stream.recv(&mr, 0, size as u32));
+        let results = futures::future::join_all(futures).await;
+
+        for result in results {
+            let wc = result?;
             println!("Recv completed: {} {:?}", wc.wr_id, wc.status);
         }
 

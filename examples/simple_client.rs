@@ -42,9 +42,7 @@ impl Drop for FileDescriptor {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
-    let mut args = Args::parse();
-
-    args.dmabuf_size = 1 << 30;
+    let args = Args::parse();
 
     let addr: SocketAddr = args.addr.parse()?;
     println!("Connecting to {}...", addr);
@@ -114,8 +112,11 @@ async fn main() -> anyhow::Result<()> {
 
     let now = std::time::Instant::now();
 
-    for _ in 0..10 {
-        let wc = stream.send(&mr, 0, len).await?;
+    let futures = (0..10).map(|_| stream.send(&mr, 0, len));
+    let results = futures::future::join_all(futures).await;
+
+    for result in results {
+        let wc = result?;
         println!("Send completed: {} {:?}", wc.wr_id, wc.status);
     }
 

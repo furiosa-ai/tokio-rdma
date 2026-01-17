@@ -128,22 +128,21 @@ impl RdmaStream {
         })
     }
 
-    pub async fn send(&mut self, mr: &MemoryRegion, offset: u64, len: u32) -> Result<ibv_wc> {
+    pub async fn send(&self, mr: &MemoryRegion, offset: u64, len: u32) -> Result<ibv_wc> {
         let wr_id = self.wr_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
 
         // Insert into the map BEFORE posting send to avoid race conditions
+        // Hold the lock during post_send to ensure thread safety of libibverbs
         {
             let mut locked = self.works.lock().await;
             locked.insert(wr_id, tx);
-        }
-
-        unsafe {
-            if let Err(e) = self.qp.post_send(mr, offset, len, wr_id, true) {
-                // If posting fails, remove the entry so we don't leak memory in the map
-                let mut locked = self.works.lock().await;
-                locked.remove(&wr_id);
-                return Err(e);
+            unsafe {
+                if let Err(e) = self.qp.post_send(mr, offset, len, wr_id, true) {
+                    // If posting fails, remove the entry so we don't leak memory in the map
+                    locked.remove(&wr_id);
+                    return Err(e);
+                }
             }
         }
 
@@ -156,22 +155,21 @@ impl RdmaStream {
         }
     }
 
-    pub async fn recv(&mut self, mr: &MemoryRegion, offset: u64, len: u32) -> Result<ibv_wc> {
+    pub async fn recv(&self, mr: &MemoryRegion, offset: u64, len: u32) -> Result<ibv_wc> {
         let wr_id = self.wr_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
 
         // Insert into the map BEFORE posting recv to avoid race conditions
+        // Hold the lock during post_recv to ensure thread safety of libibverbs
         {
             let mut locked = self.works.lock().await;
             locked.insert(wr_id, tx);
-        }
-
-        unsafe {
-            if let Err(e) = self.qp.post_recv(mr, offset, len, wr_id) {
-                // If posting fails, remove the entry so we don't leak memory in the map
-                let mut locked = self.works.lock().await;
-                locked.remove(&wr_id);
-                return Err(e);
+            unsafe {
+                if let Err(e) = self.qp.post_recv(mr, offset, len, wr_id) {
+                    // If posting fails, remove the entry so we don't leak memory in the map
+                    locked.remove(&wr_id);
+                    return Err(e);
+                }
             }
         }
 
