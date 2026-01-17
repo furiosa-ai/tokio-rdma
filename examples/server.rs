@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio_rdma::*;
 
 #[derive(Serialize, Deserialize, Debug)]
