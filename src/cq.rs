@@ -62,9 +62,6 @@ impl CompletionQueue {
             let ret = unsafe { ibv_poll_cq(self.cq, 1, &mut wc) };
 
             if ret > 0 {
-                if wc.status != ibv_wc_status::IBV_WC_SUCCESS {
-                    return Err(RdmaError::Rdma(format!("WC Error: {:?}", wc.status)));
-                }
                 return Ok(wc);
             } else if ret < 0 {
                 return Err(RdmaError::Rdma("Poll CQ failed".into()));
@@ -79,9 +76,6 @@ impl CompletionQueue {
             // 3. Poll again to avoid race
             let ret = unsafe { ibv_poll_cq(self.cq, 1, &mut wc) };
             if ret > 0 {
-                if wc.status != ibv_wc_status::IBV_WC_SUCCESS {
-                    return Err(RdmaError::Rdma(format!("WC Error: {:?}", wc.status)));
-                }
                 return Ok(wc);
             }
 

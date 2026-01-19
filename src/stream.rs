@@ -9,19 +9,25 @@ use rdma_sys::{ibv_wc, rdma_cm_event_type};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
+
+struct WorkCompletion {
+    wc: rdma_sys::ibv_wc,
+}
+
+enum Request {
+    Send(oneshot::Sender<Result<ibv_wc>>, Arc<MemoryRegion>, u64, u32),
+    Recv(oneshot::Sender<Result<ibv_wc>>, Arc<MemoryRegion>, u64, u32),
+}
 
 pub struct RdmaStream {
     pub id: CmId,
     pub qp: Arc<QueuePair>,
     pub pd: Arc<ProtectionDomain>,
     pub cq: Arc<CompletionQueue>,
-    wr_id: AtomicU64,
-    // Map from wr_id to a oneshot sender that will notify the waiting task
-    works: Arc<Mutex<HashMap<u64, oneshot::Sender<ibv_wc>>>>,
     poller_handle: JoinHandle<()>,
+    tx: tokio::sync::mpsc::Sender<Request>,
 }
 
 impl Drop for RdmaStream {
@@ -32,11 +38,14 @@ impl Drop for RdmaStream {
 
 impl RdmaStream {
     pub async fn connect(addr: SocketAddr) -> Result<Self> {
+        tracing::debug!("Connecting to {}", addr);
+
         // 1. Setup Channel & ID
         let channel = Arc::new(CmEventChannel::new()?);
         let id = CmId::new(channel.clone())?;
 
         // 2. Resolve Address
+        tracing::debug!("Resolving address...");
         id.resolve_addr(addr)?;
         let event = channel.get_event().await?;
         if event.event_type() != rdma_cm_event_type::RDMA_CM_EVENT_ADDR_RESOLVED {
@@ -45,8 +54,10 @@ impl RdmaStream {
                 event.event_type()
             )));
         }
+        tracing::debug!("Address resolved");
 
         // 3. Resolve Route
+        tracing::debug!("Resolving route...");
         id.resolve_route()?;
         let event = channel.get_event().await?;
         if event.event_type() != rdma_cm_event_type::RDMA_CM_EVENT_ROUTE_RESOLVED {
@@ -55,6 +66,7 @@ impl RdmaStream {
                 event.event_type()
             )));
         }
+        tracing::debug!("Route resolved");
 
         // 4. Create Resources
         let verbs = id.context();
@@ -75,6 +87,7 @@ impl RdmaStream {
         )?;
 
         // 5. Connect
+        tracing::debug!("Establishing connection...");
         id.connect()?;
         let event = channel.get_event().await?;
         if event.event_type() != rdma_cm_event_type::RDMA_CM_EVENT_ESTABLISHED {
@@ -83,36 +96,83 @@ impl RdmaStream {
                 event.event_type()
             )));
         }
-
-        let wr_id = AtomicU64::new(0);
-        let works = Arc::new(Mutex::new(HashMap::new()));
-
-        let poller_handle = Self::spawn_cq_poller(cq.clone(), works.clone());
-
+        tracing::debug!("Connection established");
+        let (tx, rx) = tokio::sync::mpsc::channel(128);
+        let poller_handle = Self::spawn_cq_poller(cq.clone(), rx, qp.clone());
         Ok(Self {
             id,
             qp,
             pd,
             cq,
-            wr_id,
-            works,
             poller_handle,
+            tx,
         })
+    }
+
+    fn process_request(
+        req: Request,
+        works: &mut HashMap<u64, oneshot::Sender<Result<ibv_wc>>>,
+        qp: Arc<QueuePair>,
+        wr_id: u64,
+    ) {
+        match req {
+            Request::Send(tx, mr, offset, len) => {
+                if let Err(e) = unsafe { qp.post_send(&mr, offset, len, wr_id, true) } {
+                    tx.send(Err(e)).unwrap();
+                } else {
+                    works.insert(wr_id, tx);
+                }
+            }
+            Request::Recv(tx, mr, offset, len) => {
+                if let Err(e) = unsafe { qp.post_recv(&mr, offset, len, wr_id) } {
+                    tx.send(Err(e)).unwrap();
+                } else {
+                    works.insert(wr_id, tx);
+                }
+            }
+        }
     }
 
     /// Helper to spawn the background polling task
     fn spawn_cq_poller(
         cq: Arc<CompletionQueue>,
-        works: Arc<Mutex<HashMap<u64, oneshot::Sender<ibv_wc>>>>,
+        mut request_receiver: tokio::sync::mpsc::Receiver<Request>,
+        qp: Arc<QueuePair>,
     ) -> JoinHandle<()> {
         tokio::task::spawn(async move {
+            let mut wr_id = 0u64;
+            let mut works = HashMap::new();
             loop {
+                tokio::select! {
+                        maybe_request = request_receiver.recv() => {
+                wr_id = wr_id + 1;
+                Self::process_request(maybe_request.unwrap(), &mut works, qp.clone(), wr_id)
+                        }
+                        maybe_wc = cq.poll() => {
+                        match maybe_wc {
+                            Ok(wc) => {
+                            if let Some(tx) = works.remove(&wc.wr_id) {
+                                // Send the completion to the waiting task
+                                let _ = tx.send(Ok(wc));
+                            } else {
+                                // This might happen if the sender was dropped or cancelled
+                                // or if we have a spurious completion.
+                                // For now, we just ignore it.
+                            }
+                            }
+                            Err(_e) => {
+                            // Polling failed, likely CQ destroyed or device error
+                            break;
+                            }
+                        }
+                        }
+                    }
+
                 match cq.poll().await {
                     Ok(wc) => {
-                        let mut locked = works.lock().await;
-                        if let Some(tx) = locked.remove(&wc.wr_id) {
+                        if let Some(tx) = works.remove(&wc.wr_id) {
                             // Send the completion to the waiting task
-                            let _ = tx.send(wc);
+                            let _ = tx.send(Ok(wc));
                         } else {
                             // This might happen if the sender was dropped or cancelled
                             // or if we have a spurious completion.
@@ -128,58 +188,36 @@ impl RdmaStream {
         })
     }
 
-    pub async fn send(&self, mr: &MemoryRegion, offset: u64, len: u32) -> Result<ibv_wc> {
-        let wr_id = self.wr_id.fetch_add(1, Ordering::Relaxed);
+    pub async fn send(&self, mr: Arc<MemoryRegion>, offset: u64, len: u32) -> Result<ibv_wc> {
         let (tx, rx) = oneshot::channel();
-
-        // Insert into the map BEFORE posting send to avoid race conditions
-        // Hold the lock during post_send to ensure thread safety of libibverbs
-        {
-            let mut locked = self.works.lock().await;
-            locked.insert(wr_id, tx);
-            unsafe {
-                if let Err(e) = self.qp.post_send(mr, offset, len, wr_id, true) {
-                    // If posting fails, remove the entry so we don't leak memory in the map
-                    locked.remove(&wr_id);
-                    return Err(e);
-                }
-            }
-        }
-
-        // Wait for the completion
-        match rx.await {
-            Ok(wc) => Ok(wc),
-            Err(_) => Err(RdmaError::Rdma(
-                "CQ Poller task failed or dropped channel".into(),
-            )),
-        }
+        self.tx
+            .send(Request::Send(tx, mr, offset, len))
+            .await
+            .unwrap();
+        rx.await.unwrap()
     }
 
-    pub async fn recv(&self, mr: &MemoryRegion, offset: u64, len: u32) -> Result<ibv_wc> {
-        let wr_id = self.wr_id.fetch_add(1, Ordering::Relaxed);
+    pub async fn recv(&self, mr: Arc<MemoryRegion>, offset: u64, len: u32) -> Result<ibv_wc> {
         let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Request::Recv(tx, mr, offset, len))
+            .await
+            .unwrap();
+        rx.await.unwrap()
+    }
 
-        // Insert into the map BEFORE posting recv to avoid race conditions
-        // Hold the lock during post_recv to ensure thread safety of libibverbs
-        {
-            let mut locked = self.works.lock().await;
-            locked.insert(wr_id, tx);
-            unsafe {
-                if let Err(e) = self.qp.post_recv(mr, offset, len, wr_id) {
-                    // If posting fails, remove the entry so we don't leak memory in the map
-                    locked.remove(&wr_id);
-                    return Err(e);
-                }
-            }
-        }
+    pub fn register_mr(&self, len: usize) -> Result<Arc<MemoryRegion>> {
+        MemoryRegion::register(self.pd.clone(), len)
+    }
 
-        // Wait for the completion
-        match rx.await {
-            Ok(wc) => Ok(wc),
-            Err(_) => Err(RdmaError::Rdma(
-                "CQ Poller task failed or dropped channel".into(),
-            )),
-        }
+    pub unsafe fn register_dmabuf_mr(
+        &self,
+        offset: u64,
+        len: usize,
+        fd: i32,
+        access: i32,
+    ) -> Result<Arc<MemoryRegion>> {
+        MemoryRegion::register_dmabuf(self.pd.clone(), offset, len, fd, access)
     }
 }
 
@@ -190,10 +228,12 @@ pub struct RdmaListener {
 
 impl RdmaListener {
     pub async fn bind(addr: SocketAddr) -> Result<Self> {
+        tracing::debug!("Binding to {}", addr);
         let channel = Arc::new(CmEventChannel::new()?);
         let listener_id = CmId::new(channel.clone())?;
         listener_id.bind(addr)?;
-        listener_id.listen(1)?;
+        listener_id.listen(10)?;
+        tracing::debug!("Listening on {}", addr);
         Ok(Self {
             listener_id,
             channel,
@@ -201,27 +241,37 @@ impl RdmaListener {
     }
 
     pub async fn accept(&self) -> Result<RdmaStream> {
+        tracing::debug!("Waiting for connection request...");
         loop {
             let event = self.channel.get_event().await?;
+            tracing::debug!("Server received CM event: {}", event.event_type());
             if event.event_type() == rdma_cm_event_type::RDMA_CM_EVENT_CONNECT_REQUEST {
+                tracing::debug!("Received connection request from id {:?}", event.id());
                 let client_id_raw = event.id();
+
                 // Wrap the ID initially with the listener's channel
                 let mut client_id =
                     unsafe { CmId::from_raw(client_id_raw, Some(self.channel.clone())) };
+
+                // Acknowledge the event NOW so the library can proceed
+                drop(event);
 
                 // Create a NEW channel for this connection to isolate it
                 let new_channel = Arc::new(CmEventChannel::new()?);
 
                 // Migrate the ID to the new channel
+                tracing::debug!("Migrating ID to new channel...");
                 client_id.migrate_id(new_channel.clone())?;
 
                 // Setup resources
                 let verbs = client_id.context();
+                if verbs.is_null() {
+                    tracing::error!("Client ID verbs context is NULL");
+                }
                 let device_raw = unsafe { (*verbs).device };
                 let device = Arc::new(unsafe { Device::from_context(verbs, device_raw) });
 
                 let pd = ProtectionDomain::new(device.clone())?;
-                // Default CQ size 16 for now
                 let cq = CompletionQueue::new(device.clone(), 16)?;
 
                 let qp = QueuePair::new_cm(
@@ -234,31 +284,32 @@ impl RdmaListener {
                 )?;
 
                 // Accept
+                tracing::debug!("Accepting connection...");
                 client_id.accept()?;
 
                 // Wait for ESTABLISHED on the NEW channel
+                tracing::debug!("Waiting for ESTABLISHED event on new channel...");
                 let event = new_channel.get_event().await?;
+                tracing::debug!("Received event on new channel: {}", event.event_type());
                 if event.event_type() != rdma_cm_event_type::RDMA_CM_EVENT_ESTABLISHED {
                     return Err(RdmaError::Rdma(format!(
                         "Accept failed: {:?}",
                         event.event_type()
                     )));
                 }
-
-                let wr_id = AtomicU64::new(0);
-                let works = Arc::new(Mutex::new(HashMap::new()));
+                tracing::debug!("Connection established (server side)");
+                let (tx, rx) = tokio::sync::mpsc::channel(128);
 
                 // Start the background poller for the accepted connection
-                let poller_handle = RdmaStream::spawn_cq_poller(cq.clone(), works.clone());
+                let poller_handle = RdmaStream::spawn_cq_poller(cq.clone(), rx, qp.clone());
 
                 return Ok(RdmaStream {
                     id: client_id,
                     qp,
                     pd,
                     cq,
-                    wr_id,
-                    works,
                     poller_handle,
+                    tx,
                 });
             }
         }

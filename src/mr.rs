@@ -2,6 +2,7 @@ use crate::error::{RdmaError, Result};
 use crate::pd::ProtectionDomain;
 use rdma_sys::*;
 use std::ffi::c_void;
+use std::ops::DerefMut;
 use std::sync::Arc;
 
 pub struct MemoryRegion {
@@ -39,7 +40,7 @@ impl MemoryRegion {
         len: usize,
         fd: i32,
         access: i32,
-    ) -> Result<Self> {
+    ) -> Result<Arc<Self>> {
         let mr = unsafe {
             ibv_reg_dmabuf_mr(
                 pd.pd, offset, len, 0, // iova
@@ -55,14 +56,14 @@ impl MemoryRegion {
             )));
         }
 
-        Ok(Self {
+        Ok(Arc::new(Self {
             mr,
             _pd: pd,
             _data: None,
-        })
+        }))
     }
 
-    pub fn register(pd: Arc<ProtectionDomain>, len: usize) -> Result<Self> {
+    pub fn register(pd: Arc<ProtectionDomain>, len: usize) -> Result<Arc<Self>> {
         let mut data = vec![0u8; len];
         let access = ibv_access_flags::IBV_ACCESS_LOCAL_WRITE.0
             | ibv_access_flags::IBV_ACCESS_REMOTE_WRITE.0
@@ -78,11 +79,11 @@ impl MemoryRegion {
             )));
         }
 
-        Ok(Self {
+        Ok(Arc::new(Self {
             mr,
             _pd: pd,
             _data: Some(data),
-        })
+        }))
     }
 
     pub fn rkey(&self) -> u32 {

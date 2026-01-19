@@ -502,7 +502,7 @@ dependencies = [
 [[package]]
 name = "rdma-sys"
 version = "0.3.0"
-source = "git+https://github.com/furiosa-ai/rdma-sys?rev=b620872#b620872ec3dd82efba16228740efe6accb2fe062"
+source = "git+https://github.com/furiosa-ai/rdma-sys?rev=66a70e2#66a70e2b2e44b3708e0371a67b51567511f9e5a1"
 dependencies = [
  "bindgen",
  "libc",

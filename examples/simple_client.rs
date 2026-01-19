@@ -81,23 +81,22 @@ async fn main() -> anyhow::Result<()> {
         // | rdma_sys::ibv_access_flags::IBV_ACCESS_ZERO_BASED.0;
         // | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_WRITE.0;
 
-        let mr = MemoryRegion::register_dmabuf(
-            stream.pd.clone(),
-            0,
-            args.dmabuf_size as usize,
-            fd,
-            access as i32,
-        )?;
+        let mr =
+            unsafe { stream.register_dmabuf_mr(0, args.dmabuf_size as usize, fd, access as i32)? };
 
         _dmabuf_fd_guard = Some(FileDescriptor(fd));
         mr
     } else {
         println!("Using Host Memory");
         _dmabuf_fd_guard = None;
-        let mut mr = MemoryRegion::register(stream.pd.clone(), 1024)?;
+
+        let mr = stream.register_mr(1024)?;
         let msg = b"Hello High-Level RDMA!";
+
+        // TODO: use as_mut_slice()...
+        let addr = mr.addr() as *mut u8;
         unsafe {
-            mr.as_mut_slice()[..msg.len()].copy_from_slice(msg);
+            std::slice::from_raw_parts_mut(addr, msg.len()).copy_from_slice(msg);
         }
         mr
     };
@@ -112,7 +111,7 @@ async fn main() -> anyhow::Result<()> {
 
     let now = std::time::Instant::now();
 
-    let futures = (0..10).map(|_| stream.send(&mr, 0, len));
+    let futures = (0..10).map(|_| stream.send(mr.clone(), 0, len));
     let results = futures::future::join_all(futures).await;
 
     for result in results {
@@ -123,15 +122,15 @@ async fn main() -> anyhow::Result<()> {
     let elapsed = now.elapsed();
     println!("for {}ms", elapsed.as_millis());
 
-    let wc = stream.recv(&mr, 0, len).await?;
+    // let wc = stream.recv(&mr, 0, len).await?;
 
-    let elapsed = now.elapsed();
-    println!(
-        "Recv completed: {} {:?} for {}ms",
-        wc.wr_id,
-        wc.status,
-        elapsed.as_millis()
-    );
+    // let elapsed = now.elapsed();
+    // println!(
+    //     "Recv completed: {} {:?} for {}ms",
+    //     wc.wr_id,
+    //     wc.status,
+    //     elapsed.as_millis()
+    // );
 
     Ok(())
 }

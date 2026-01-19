@@ -114,15 +114,11 @@ async fn main() -> anyhow::Result<()> {
                 | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_READ.0;
             // | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_WRITE.0;
 
-            MemoryRegion::register_dmabuf(
-                stream.pd.clone(),
-                0,
-                dmabuf.size as usize,
-                dmabuf.raw_fd,
-                access as i32,
-            )?
+            unsafe {
+                stream.register_dmabuf_mr(0, dmabuf.size as usize, dmabuf.raw_fd, access as i32)?
+            }
         } else {
-            MemoryRegion::register(stream.pd.clone(), 1024)?
+            stream.register_mr(1024)?
         };
 
         let size = if let Some(_dmabuf) = &maybe_dmabuf {
@@ -132,7 +128,7 @@ async fn main() -> anyhow::Result<()> {
         };
         // Post recv concurrently
 
-        let futures = (0..10).map(|_| stream.recv(&mr, 0, size as u32));
+        let futures = (0..10).map(|_| stream.recv(mr.clone(), 0, size as u32));
         let results = futures::future::join_all(futures).await;
 
         for result in results {
@@ -160,10 +156,10 @@ async fn main() -> anyhow::Result<()> {
         //     println!("Message: {:?}", String::from_utf8_lossy(msg));
         // }
 
-        let wc = stream.send(&mr, 0, size as u32).await?;
-        println!(
-            "Send message! status: {:?}, len: {}",
-            wc.status, wc.byte_len
-        );
+        // let wc = stream.send(&mr, 0, size as u32).await?;
+        // println!(
+        // "Send message! status: {:?}, len: {}",
+        // wc.status, wc.byte_len
+        // );
     }
 }

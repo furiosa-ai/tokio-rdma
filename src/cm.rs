@@ -32,22 +32,36 @@ impl CmEventChannel {
 
     pub async fn get_event(&self) -> Result<CmEvent> {
         loop {
-            let mut event: *mut rdma_cm_event = ptr::null_mut();
-            let ret = unsafe { rdma_get_cm_event(self.channel, &mut event) };
+            let mut guard = self.async_fd.readable().await?;
 
-            if ret == 0 {
-                return Ok(CmEvent { event });
-            } else {
-                let errno = unsafe { *libc::__errno_location() };
-                if errno == libc::EAGAIN || errno == libc::EWOULDBLOCK {
-                    let mut guard = self.async_fd.readable().await?;
-                    guard.clear_ready();
+            let result = guard.try_io(|_inner| {
+                let mut event: *mut rdma_cm_event = ptr::null_mut();
+                let ret = unsafe { rdma_get_cm_event(self.channel, &mut event) };
+
+                if ret == 0 {
+                    let event_type = unsafe { (*event).event };
+                    tracing::debug!("rdma_get_cm_event got event: {}", event_type);
+                    Ok(CmEvent { event })
                 } else {
-                    return Err(RdmaError::Rdma(format!(
-                        "Failed to get CM event: {}",
-                        errno
-                    )));
+                    let errno = unsafe { *libc::__errno_location() };
+                    if errno != libc::EAGAIN {
+                        tracing::error!("rdma_get_cm_event failed with errno: {}", errno);
+                        Err(std::io::Error::from_raw_os_error(errno))
+                    } else {
+                        Err(std::io::Error::from_raw_os_error(libc::EAGAIN))
+                    }
                 }
+            });
+
+            match result {
+                Ok(Ok(event)) => return Ok(event),
+                Ok(Err(e)) => {
+                    if e.kind() == std::io::ErrorKind::WouldBlock {
+                        continue;
+                    }
+                    return Err(RdmaError::Rdma(format!("Failed to get CM event: {}", e)));
+                }
+                Err(_would_block) => continue,
             }
         }
     }
@@ -62,6 +76,9 @@ impl Drop for CmEventChannel {
 pub struct CmEvent {
     pub(crate) event: *mut rdma_cm_event,
 }
+
+unsafe impl Send for CmEvent {}
+unsafe impl Sync for CmEvent {}
 
 impl CmEvent {
     pub fn event_type(&self) -> rdma_cm_event_type::Type {
