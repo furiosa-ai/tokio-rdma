@@ -55,6 +55,7 @@ impl Drop for DeviceList {
     }
 }
 
+#[derive(Debug)]
 pub struct Device {
     pub raw: *mut ibv_device,
     pub context: *mut ibv_context,

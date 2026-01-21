@@ -3,6 +3,7 @@ use crate::error::{RdmaError, Result};
 use rdma_sys::*;
 use std::sync::Arc;
 
+#[derive(Debug)]
 pub struct ProtectionDomain {
     pub(crate) pd: *mut ibv_pd,
     _device: Arc<Device>, // Keep device alive

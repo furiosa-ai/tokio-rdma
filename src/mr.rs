@@ -4,6 +4,7 @@ use rdma_sys::*;
 use std::ffi::c_void;
 use std::sync::Arc;
 
+#[derive(Debug)]
 pub struct MemoryRegion {
     pub(crate) mr: *mut ibv_mr,
     _pd: Arc<ProtectionDomain>,

@@ -25,6 +25,18 @@ enum Request {
         oneshot::Sender<Result<ibv_wc>>,
         Vec<(Arc<MemoryRegion>, u64, u32)>,
     ),
+    Read(
+        oneshot::Sender<Result<ibv_wc>>,
+        Vec<(Arc<MemoryRegion>, u64, u32)>,
+        u64, // remote_addr
+        u32, // rkey
+    ),
+    Write(
+        oneshot::Sender<Result<ibv_wc>>,
+        Vec<(Arc<MemoryRegion>, u64, u32)>,
+        u64, // remote_addr
+        u32, // rkey
+    ),
 }
 
 pub struct RdmaStream {
@@ -115,12 +127,25 @@ impl RdmaStream {
         })
     }
 
-    fn process_request(
+    fn handle_completion(works: &mut HashMap<u64, oneshot::Sender<Result<ibv_wc>>>, wc: ibv_wc) {
+        if let Some(tx) = works.remove(&wc.wr_id) {
+            // Send the completion to the waiting task
+            let _ = tx.send(Ok(wc));
+        } else {
+            // This might happen if the sender was dropped or cancelled
+            // or if we have a spurious completion.
+            // For now, we just ignore it.
+            tracing::warn!("no wc entry for {wc:?}");
+        }
+    }
+
+    fn handle_request(
         req: Request,
         works: &mut HashMap<u64, oneshot::Sender<Result<ibv_wc>>>,
         qp: Arc<QueuePair>,
-        wr_id: u64,
+        wr_id: &mut u64,
     ) {
+        *wr_id = *wr_id + 1;
         match req {
             Request::Send(tx, requests) => {
                 let reqs: Vec<_> = requests
@@ -128,12 +153,14 @@ impl RdmaStream {
                     .map(|(mr, offset, len)| (mr.as_ref(), *offset, *len))
                     .collect();
 
-		let dur = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
-		println!("post_send_multi {}", dur.as_nanos());
-                if let Err(e) = unsafe { qp.post_send_multi(reqs, wr_id, true) } {
+                let dur = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap();
+                println!("post_send_multi {}", dur.as_nanos());
+                if let Err(e) = unsafe { qp.post_send_multi(reqs, *wr_id, true) } {
                     tx.send(Err(e)).unwrap();
                 } else {
-                    works.insert(wr_id, tx);
+                    works.insert(*wr_id, tx);
                 }
             }
             Request::Recv(tx, requests) => {
@@ -142,10 +169,52 @@ impl RdmaStream {
                     .map(|(mr, offset, len)| (mr.as_ref(), *offset, *len))
                     .collect();
 
-                if let Err(e) = unsafe { qp.post_recv_multi(reqs, wr_id) } {
+                if let Err(e) = unsafe { qp.post_recv_multi(reqs, *wr_id) } {
                     tx.send(Err(e)).unwrap();
                 } else {
-                    works.insert(wr_id, tx);
+                    works.insert(*wr_id, tx);
+                }
+            }
+            Request::Read(tx, requests, remote_addr, rkey) => {
+                let reqs: Vec<_> = requests
+                    .iter()
+                    .map(|(mr, offset, len)| (mr.as_ref(), *offset, *len))
+                    .collect();
+
+                if let Err(e) = unsafe {
+                    qp.post_rdma(
+                        reqs,
+                        rdma_sys::ibv_wr_opcode::IBV_WR_RDMA_READ,
+                        *wr_id,
+                        true,
+                        remote_addr,
+                        rkey,
+                    )
+                } {
+                    tx.send(Err(e)).unwrap();
+                } else {
+                    works.insert(*wr_id, tx);
+                }
+            }
+            Request::Write(tx, requests, remote_addr, rkey) => {
+                let reqs: Vec<_> = requests
+                    .iter()
+                    .map(|(mr, offset, len)| (mr.as_ref(), *offset, *len))
+                    .collect();
+
+                if let Err(e) = unsafe {
+                    qp.post_rdma(
+                        reqs,
+                        rdma_sys::ibv_wr_opcode::IBV_WR_RDMA_WRITE,
+                        *wr_id,
+                        true,
+                        remote_addr,
+                        rkey,
+                    )
+                } {
+                    tx.send(Err(e)).unwrap();
+                } else {
+                    works.insert(*wr_id, tx);
                 }
             }
         }
@@ -162,44 +231,17 @@ impl RdmaStream {
             let mut works = HashMap::new();
             loop {
                 tokio::select! {
-                        maybe_request = request_receiver.recv() => {
-                wr_id = wr_id + 1;
-                Self::process_request(maybe_request.unwrap(), &mut works, qp.clone(), wr_id)
-                        }
-                        maybe_wc = cq.poll() => {
+                    maybe_request = request_receiver.recv() =>
+                        Self::handle_request(maybe_request.unwrap(), &mut works, qp.clone(), &mut wr_id),
+                    maybe_wc = cq.poll() =>
+                    {
                         match maybe_wc {
-                            Ok(wc) => {
-                            if let Some(tx) = works.remove(&wc.wr_id) {
-                                // Send the completion to the waiting task
-                                let _ = tx.send(Ok(wc));
-                            } else {
-                                // This might happen if the sender was dropped or cancelled
-                                // or if we have a spurious completion.
-                                // For now, we just ignore it.
-                            }
-                            }
+                            Ok(wc) => Self::handle_completion(&mut works, wc),
                             Err(_e) => {
-                            // Polling failed, likely CQ destroyed or device error
-                            break;
+                                // Polling failed, likely CQ destroyed or device error
+                                break;
                             }
                         }
-                        }
-                    }
-
-                match cq.poll().await {
-                    Ok(wc) => {
-                        if let Some(tx) = works.remove(&wc.wr_id) {
-                            // Send the completion to the waiting task
-                            let _ = tx.send(Ok(wc));
-                        } else {
-                            // This might happen if the sender was dropped or cancelled
-                            // or if we have a spurious completion.
-                            // For now, we just ignore it.
-                        }
-                    }
-                    Err(_e) => {
-                        // Polling failed, likely CQ destroyed or device error
-                        break;
                     }
                 }
             }
@@ -231,6 +273,48 @@ impl RdmaStream {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(Request::Recv(tx, vec![(mr, offset, len)]))
+            .await
+            .unwrap();
+        rx.await.unwrap()
+    }
+
+    pub async fn read(
+        &self,
+        mr: Arc<MemoryRegion>,
+        offset: u64,
+        len: u32,
+        remote_addr: u64,
+        rkey: u32,
+    ) -> Result<ibv_wc> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Request::Read(
+                tx,
+                vec![(mr, offset, len)],
+                remote_addr,
+                rkey,
+            ))
+            .await
+            .unwrap();
+        rx.await.unwrap()
+    }
+
+    pub async fn write(
+        &self,
+        mr: Arc<MemoryRegion>,
+        offset: u64,
+        len: u32,
+        remote_addr: u64,
+        rkey: u32,
+    ) -> Result<ibv_wc> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Request::Write(
+                tx,
+                vec![(mr, offset, len)],
+                remote_addr,
+                rkey,
+            ))
             .await
             .unwrap();
         rx.await.unwrap()

@@ -227,6 +227,49 @@ impl QueuePair {
         }
         Ok(())
     }
+
+    pub unsafe fn post_rdma(
+        &self,
+        req: Vec<(&MemoryRegion, u64, u32)>,
+        op: ibv_wr_opcode::Type,
+        wr_id: u64,
+        signaled: bool,
+        remote_addr: u64,
+        rkey: u32,
+    ) -> Result<()> {
+        let mut sges: Vec<_> = req
+            .iter()
+            .map(|(mr, offset, len)| {
+                let mut sge: ibv_sge = unsafe { std::mem::zeroed() };
+                sge.addr = mr.addr() + offset;
+                sge.length = *len;
+                sge.lkey = mr.lkey();
+                sge
+            })
+            .collect();
+
+        let mut wr: ibv_send_wr = unsafe { std::mem::zeroed() };
+        wr.wr_id = wr_id;
+        wr.sg_list = sges.as_mut_ptr();
+        wr.num_sge = sges.len().try_into().unwrap();
+        wr.opcode = op;
+        wr.send_flags = if signaled {
+            ibv_send_flags::IBV_SEND_SIGNALED.0
+        } else {
+            0
+        };
+        wr.wr.rdma.remote_addr = remote_addr;
+        wr.wr.rdma.rkey = rkey;
+        wr.next = ptr::null_mut();
+
+        let mut bad_wr: *mut ibv_send_wr = ptr::null_mut();
+
+        let ret = unsafe { ibv_post_send(self.qp, &mut wr, &mut bad_wr) };
+        if ret != 0 {
+            return Err(RdmaError::Rdma(format!("Failed to post rdma: {}", ret)));
+        }
+        Ok(())
+    }
 }
 
 impl Drop for QueuePair {
