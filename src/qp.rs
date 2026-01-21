@@ -23,31 +23,6 @@ pub struct QpInitAttr {
 }
 
 impl QueuePair {
-    pub fn new(pd: Arc<ProtectionDomain>, init_attr: QpInitAttr) -> Result<Arc<Self>> {
-        let mut attr: ibv_qp_init_attr = unsafe { std::mem::zeroed() };
-        attr.qp_type = ibv_qp_type::IBV_QPT_RC;
-        attr.sq_sig_all = 0; // explicit signaling
-        attr.send_cq = init_attr.send_cq.cq;
-        attr.recv_cq = init_attr.recv_cq.cq;
-
-        attr.cap.max_send_wr = 10;
-        attr.cap.max_recv_wr = 10;
-        attr.cap.max_send_sge = 1;
-        attr.cap.max_recv_sge = 1;
-
-        let qp = unsafe { ibv_create_qp(pd.pd, &mut attr) };
-        if qp.is_null() {
-            return Err(RdmaError::Rdma("Failed to create QP".into()));
-        }
-
-        Ok(Arc::new(Self {
-            qp,
-            _pd: pd,
-            _scq: init_attr.send_cq,
-            _rcq: init_attr.recv_cq,
-        }))
-    }
-
     pub fn new_cm(
         pd: Arc<ProtectionDomain>,
         cm_id: *mut rdma_cm_id,
@@ -59,14 +34,14 @@ impl QueuePair {
         attr.send_cq = init_attr.send_cq.cq;
         attr.recv_cq = init_attr.recv_cq.cq;
 
-        attr.cap.max_send_wr = 10;
-        attr.cap.max_recv_wr = 10;
+        attr.cap.max_send_wr = 128;
+        attr.cap.max_recv_wr = 128;
         attr.cap.max_send_sge = 1;
         attr.cap.max_recv_sge = 1;
 
         let ret = unsafe { rdma_create_qp(cm_id, pd.pd, &mut attr) };
         if ret != 0 {
-            return Err(RdmaError::Rdma("Failed to create CM QP".into()));
+            return Err(RdmaError::Rdma(format!("Failed to create CM QP: {}", ret)));
         }
 
         let qp = unsafe { (*cm_id).qp };
@@ -184,50 +159,58 @@ impl QueuePair {
         Ok(())
     }
 
-    pub unsafe fn post_recv(
+    pub unsafe fn post_recv_multi(
         &self,
-        mr: &MemoryRegion,
-        offset: u64,
-        len: u32,
+        req: Vec<(&MemoryRegion, u64, u32)>,
         wr_id: u64,
     ) -> Result<()> {
-        let mut sge: ibv_sge = unsafe { std::mem::zeroed() };
-        sge.addr = mr.addr() + offset;
-        sge.length = len;
-        sge.lkey = mr.lkey();
+        let mut sges: Vec<_> = req
+            .iter()
+            .map(|(mr, offset, len)| {
+                let mut sge: ibv_sge = unsafe { std::mem::zeroed() };
+                sge.addr = mr.addr() + offset;
+                sge.length = *len;
+                sge.lkey = mr.lkey();
+                sge
+            })
+            .collect();
 
         let mut wr: ibv_recv_wr = unsafe { std::mem::zeroed() };
         wr.wr_id = wr_id;
-        wr.sg_list = &mut sge;
-        wr.num_sge = 1;
+        wr.sg_list = sges.as_mut_ptr();
+        wr.num_sge = sges.len().try_into().unwrap();
         wr.next = ptr::null_mut();
 
         let mut bad_wr: *mut ibv_recv_wr = ptr::null_mut();
 
         let ret = unsafe { ibv_post_recv(self.qp, &mut wr, &mut bad_wr) };
         if ret != 0 {
-            return Err(RdmaError::Rdma("Failed to post recv".into()));
+            return Err(RdmaError::Rdma(format!("Failed to post recv : {}", ret)));
         }
         Ok(())
     }
 
-    pub unsafe fn post_send(
+    pub unsafe fn post_send_multi(
         &self,
-        mr: &MemoryRegion,
-        offset: u64,
-        len: u32,
+        req: Vec<(&MemoryRegion, u64, u32)>,
         wr_id: u64,
         signaled: bool,
     ) -> Result<()> {
-        let mut sge: ibv_sge = unsafe { std::mem::zeroed() };
-        sge.addr = mr.addr() + offset;
-        sge.length = len;
-        sge.lkey = mr.lkey();
+        let mut sges: Vec<_> = req
+            .iter()
+            .map(|(mr, offset, len)| {
+                let mut sge: ibv_sge = unsafe { std::mem::zeroed() };
+                sge.addr = mr.addr() + offset;
+                sge.length = *len;
+                sge.lkey = mr.lkey();
+                sge
+            })
+            .collect();
 
         let mut wr: ibv_send_wr = unsafe { std::mem::zeroed() };
         wr.wr_id = wr_id;
-        wr.sg_list = &mut sge;
-        wr.num_sge = 1;
+        wr.sg_list = sges.as_mut_ptr();
+        wr.num_sge = sges.len().try_into().unwrap();
         wr.opcode = ibv_wr_opcode::IBV_WR_SEND;
         wr.send_flags = if signaled {
             ibv_send_flags::IBV_SEND_SIGNALED.0
@@ -240,7 +223,7 @@ impl QueuePair {
 
         let ret = unsafe { ibv_post_send(self.qp, &mut wr, &mut bad_wr) };
         if ret != 0 {
-            return Err(RdmaError::Rdma("Failed to post send".into()));
+            return Err(RdmaError::Rdma(format!("Failed to post send: {}", ret)));
         }
         Ok(())
     }

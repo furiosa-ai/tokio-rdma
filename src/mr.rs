@@ -2,7 +2,6 @@ use crate::error::{RdmaError, Result};
 use crate::pd::ProtectionDomain;
 use rdma_sys::*;
 use std::ffi::c_void;
-use std::ops::DerefMut;
 use std::sync::Arc;
 
 pub struct MemoryRegion {

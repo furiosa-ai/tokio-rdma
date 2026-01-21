@@ -9,7 +9,7 @@ use rdma_sys::{ibv_wc, rdma_cm_event_type};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 struct WorkCompletion {
@@ -17,8 +17,14 @@ struct WorkCompletion {
 }
 
 enum Request {
-    Send(oneshot::Sender<Result<ibv_wc>>, Arc<MemoryRegion>, u64, u32),
-    Recv(oneshot::Sender<Result<ibv_wc>>, Arc<MemoryRegion>, u64, u32),
+    Send(
+        oneshot::Sender<Result<ibv_wc>>,
+        Vec<(Arc<MemoryRegion>, u64, u32)>,
+    ),
+    Recv(
+        oneshot::Sender<Result<ibv_wc>>,
+        Vec<(Arc<MemoryRegion>, u64, u32)>,
+    ),
 }
 
 pub struct RdmaStream {
@@ -116,15 +122,27 @@ impl RdmaStream {
         wr_id: u64,
     ) {
         match req {
-            Request::Send(tx, mr, offset, len) => {
-                if let Err(e) = unsafe { qp.post_send(&mr, offset, len, wr_id, true) } {
+            Request::Send(tx, requests) => {
+                let reqs: Vec<_> = requests
+                    .iter()
+                    .map(|(mr, offset, len)| (mr.as_ref(), *offset, *len))
+                    .collect();
+
+		let dur = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+		println!("post_send_multi {}", dur.as_nanos());
+                if let Err(e) = unsafe { qp.post_send_multi(reqs, wr_id, true) } {
                     tx.send(Err(e)).unwrap();
                 } else {
                     works.insert(wr_id, tx);
                 }
             }
-            Request::Recv(tx, mr, offset, len) => {
-                if let Err(e) = unsafe { qp.post_recv(&mr, offset, len, wr_id) } {
+            Request::Recv(tx, requests) => {
+                let reqs: Vec<_> = requests
+                    .iter()
+                    .map(|(mr, offset, len)| (mr.as_ref(), *offset, *len))
+                    .collect();
+
+                if let Err(e) = unsafe { qp.post_recv_multi(reqs, wr_id) } {
                     tx.send(Err(e)).unwrap();
                 } else {
                     works.insert(wr_id, tx);
@@ -188,10 +206,22 @@ impl RdmaStream {
         })
     }
 
+    pub async fn send_multi(&self, requests: Vec<(Arc<MemoryRegion>, u64, u32)>) -> Result<ibv_wc> {
+        let (tx, rx) = oneshot::channel();
+        self.tx.send(Request::Send(tx, requests)).await.unwrap();
+        rx.await.unwrap()
+    }
+
+    pub async fn recv_multi(&self, requests: Vec<(Arc<MemoryRegion>, u64, u32)>) -> Result<ibv_wc> {
+        let (tx, rx) = oneshot::channel();
+        self.tx.send(Request::Recv(tx, requests)).await.unwrap();
+        rx.await.unwrap()
+    }
+
     pub async fn send(&self, mr: Arc<MemoryRegion>, offset: u64, len: u32) -> Result<ibv_wc> {
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(Request::Send(tx, mr, offset, len))
+            .send(Request::Send(tx, vec![(mr, offset, len)]))
             .await
             .unwrap();
         rx.await.unwrap()
@@ -200,7 +230,7 @@ impl RdmaStream {
     pub async fn recv(&self, mr: Arc<MemoryRegion>, offset: u64, len: u32) -> Result<ibv_wc> {
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(Request::Recv(tx, mr, offset, len))
+            .send(Request::Recv(tx, vec![(mr, offset, len)]))
             .await
             .unwrap();
         rx.await.unwrap()

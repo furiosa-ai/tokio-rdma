@@ -95,7 +95,7 @@ async fn main() -> anyhow::Result<()> {
     let listener = RdmaListener::bind(addr).await?;
     println!("Listening...");
 
-    args.dmabuf_size = 2 << 30;
+    args.dmabuf_size = 1 << 30;
 
     // Pre-export dmabuf if needed
     let maybe_dmabuf = if let Some(path) = &args.dmabuf_dev {
@@ -114,21 +114,27 @@ async fn main() -> anyhow::Result<()> {
                 | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_READ.0;
             // | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_WRITE.0;
 
-            unsafe {
+            let mr = unsafe {
                 stream.register_dmabuf_mr(0, dmabuf.size as usize, dmabuf.raw_fd, access as i32)?
-            }
+            };
+
+            println!("mr addr {:#x}", mr.addr());
+
+            mr
         } else {
             stream.register_mr(1024)?
         };
 
-        let size = if let Some(_dmabuf) = &maybe_dmabuf {
+        let len = if let Some(_dmabuf) = &maybe_dmabuf {
             1 << 30
         } else {
             1024
         };
         // Post recv concurrently
+        // let wc = stream.recv(mr.clone(), 0, len).await.unwrap();
+        // println!("{wc:?}");
 
-        let futures = (0..10).map(|_| stream.recv(mr.clone(), 0, size as u32));
+        let futures = (0..10).map(|_| stream.recv(mr.clone(), 0, len as u32));
         let results = futures::future::join_all(futures).await;
 
         for result in results {
