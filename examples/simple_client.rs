@@ -2,7 +2,7 @@ use clap::Parser;
 use std::fs::OpenOptions;
 use std::net::SocketAddr;
 use std::os::unix::io::AsRawFd;
-use tokio_rdma::{MemoryRegion, RdmaStream};
+use tokio_rdma::RdmaStream;
 
 #[repr(C, packed)]
 struct NpuDmabufRegion {
@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
 
     let addr: SocketAddr = args.addr.parse()?;
     println!("Connecting to {}...", addr);
-    let mut stream = RdmaStream::connect(addr).await?;
+    let stream = RdmaStream::connect(addr).await?;
     println!("Connected!");
 
     // Helper to keep the fd alive if needed
@@ -120,7 +120,7 @@ async fn main() -> anyhow::Result<()> {
     let results = futures::future::join_all(futures).await;
     for result in results {
         let wc = result?;
-        println!("Send completed: {} {:?}", wc.wr_id, wc.status);
+        println!("Send completed: {wc:?}");
     }
 
     let elapsed = now.elapsed();

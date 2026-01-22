@@ -12,11 +12,12 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-struct WorkCompletion {
-    wc: rdma_sys::ibv_wc,
+#[derive(Debug)]
+pub struct WorkCompletion {
+    pub wc: rdma_sys::ibv_wc,
 }
 
-enum Request {
+pub enum Request {
     Send(
         oneshot::Sender<Result<ibv_wc>>,
         Vec<(Arc<MemoryRegion>, u64, u32)>,
@@ -248,34 +249,54 @@ impl RdmaStream {
         })
     }
 
-    pub async fn send_multi(&self, requests: Vec<(Arc<MemoryRegion>, u64, u32)>) -> Result<ibv_wc> {
+    pub async fn send_multi(
+        &self,
+        requests: Vec<(Arc<MemoryRegion>, u64, u32)>,
+    ) -> Result<WorkCompletion> {
         let (tx, rx) = oneshot::channel();
-        self.tx.send(Request::Send(tx, requests)).await.unwrap();
-        rx.await.unwrap()
+        self.tx.send(Request::Send(tx, requests)).await?;
+        let wc = rx.await??;
+        Ok(WorkCompletion { wc })
     }
 
-    pub async fn recv_multi(&self, requests: Vec<(Arc<MemoryRegion>, u64, u32)>) -> Result<ibv_wc> {
+    pub async fn recv_multi(
+        &self,
+        requests: Vec<(Arc<MemoryRegion>, u64, u32)>,
+    ) -> Result<WorkCompletion> {
         let (tx, rx) = oneshot::channel();
         self.tx.send(Request::Recv(tx, requests)).await.unwrap();
-        rx.await.unwrap()
+        let wc = rx.await??;
+        Ok(WorkCompletion { wc })
     }
 
-    pub async fn send(&self, mr: Arc<MemoryRegion>, offset: u64, len: u32) -> Result<ibv_wc> {
+    pub async fn send(
+        &self,
+        mr: Arc<MemoryRegion>,
+        offset: u64,
+        len: u32,
+    ) -> Result<WorkCompletion> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(Request::Send(tx, vec![(mr, offset, len)]))
             .await
             .unwrap();
-        rx.await.unwrap()
+        let wc = rx.await??;
+        Ok(WorkCompletion { wc })
     }
 
-    pub async fn recv(&self, mr: Arc<MemoryRegion>, offset: u64, len: u32) -> Result<ibv_wc> {
+    pub async fn recv(
+        &self,
+        mr: Arc<MemoryRegion>,
+        offset: u64,
+        len: u32,
+    ) -> Result<WorkCompletion> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(Request::Recv(tx, vec![(mr, offset, len)]))
             .await
             .unwrap();
-        rx.await.unwrap()
+        let wc = rx.await??;
+        Ok(WorkCompletion { wc })
     }
 
     pub async fn read(
@@ -285,7 +306,7 @@ impl RdmaStream {
         len: u32,
         remote_addr: u64,
         rkey: u32,
-    ) -> Result<ibv_wc> {
+    ) -> Result<WorkCompletion> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(Request::Read(
@@ -294,9 +315,9 @@ impl RdmaStream {
                 remote_addr,
                 rkey,
             ))
-            .await
-            .unwrap();
-        rx.await.unwrap()
+            .await?;
+        let wc = rx.await??;
+        Ok(WorkCompletion { wc })
     }
 
     pub async fn write(
@@ -306,7 +327,7 @@ impl RdmaStream {
         len: u32,
         remote_addr: u64,
         rkey: u32,
-    ) -> Result<ibv_wc> {
+    ) -> Result<WorkCompletion> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(Request::Write(
@@ -317,7 +338,8 @@ impl RdmaStream {
             ))
             .await
             .unwrap();
-        rx.await.unwrap()
+        let wc = rx.await??;
+        Ok(WorkCompletion { wc })
     }
 
     pub fn register_mr(&self, len: usize) -> Result<Arc<MemoryRegion>> {

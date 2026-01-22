@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::os::fd::FromRawFd;
 use std::os::unix::io::AsRawFd;
 use std::{fs::OpenOptions, path::Path};
-use tokio_rdma::{MemoryRegion, RdmaListener};
+use tokio_rdma::RdmaListener;
 
 #[repr(C, packed)]
 struct NpuDmabufRegion {
@@ -106,7 +106,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     loop {
-        let mut stream = listener.accept().await?;
+        let stream = listener.accept().await?;
         println!("Accepted connection!");
 
         let mr = if let Some(dmabuf) = &maybe_dmabuf {
@@ -118,8 +118,7 @@ async fn main() -> anyhow::Result<()> {
                 stream.register_dmabuf_mr(0, dmabuf.size as usize, dmabuf.raw_fd, access as i32)?
             };
 
-            println!("mr addr {:#x}", mr.addr());
-
+            println!("registered mr {mr:?}");
             mr
         } else {
             stream.register_mr(1024)?
@@ -139,7 +138,7 @@ async fn main() -> anyhow::Result<()> {
 
         for result in results {
             let wc = result?;
-            println!("Recv completed: {} {:?}", wc.wr_id, wc.status);
+            println!("Recv completed: {wc:?}");
         }
 
         // if let Some(dmabuf) = &maybe_dmabuf {
