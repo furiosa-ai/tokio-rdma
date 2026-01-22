@@ -2,8 +2,12 @@ use clap::Parser;
 use std::net::SocketAddr;
 use std::os::fd::FromRawFd;
 use std::os::unix::io::AsRawFd;
+use std::sync::Arc;
 use std::{fs::OpenOptions, path::Path};
-use tokio_rdma::RdmaListener;
+use tokio_rdma::{MemoryRegion, RdmaListener, RdmaStream};
+
+const NPU_BAR_IOCTL_MAGIC: u8 = b'N';
+const NPU_BAR_EXPORT_DMABUF: i32 = 0x01;
 
 #[repr(C, packed)]
 struct NpuDmabufRegion {
@@ -12,7 +16,12 @@ struct NpuDmabufRegion {
     fd: i32,
 }
 
-const NPU_BAR_EXPORT_DMABUF: u64 = 0xc0144e01;
+nix::ioctl_readwrite!(
+    ioctl_npu_bar_export_dmabuf,
+    NPU_BAR_IOCTL_MAGIC,
+    NPU_BAR_EXPORT_DMABUF,
+    NpuDmabufRegion
+);
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -45,16 +54,8 @@ impl DMABuf {
             size: size as u64,
             fd: -1,
         };
-        let ret = unsafe {
-            libc::ioctl(
-                file.as_raw_fd(),
-                NPU_BAR_EXPORT_DMABUF as libc::c_ulong,
-                &mut region,
-            )
-        };
-        if ret != 0 {
-            anyhow::bail!("ioctl failed: {}", std::io::Error::last_os_error());
-        }
+
+        unsafe { ioctl_npu_bar_export_dmabuf(file.as_raw_fd(), &mut region)? };
 
         let raw_fd = region.fd;
         println!("Exported dmabuf fd: {}", raw_fd);
@@ -85,6 +86,26 @@ impl Drop for DMABuf {
     }
 }
 
+fn register_mr(
+    stream: &RdmaStream,
+    maybe_dmabuf: &Option<DMABuf>,
+) -> anyhow::Result<Arc<MemoryRegion>> {
+    let mr = if let Some(dmabuf) = &maybe_dmabuf {
+        let access = rdma_sys::ibv_access_flags::IBV_ACCESS_LOCAL_WRITE.0
+            | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_READ.0;
+        // | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_WRITE.0;
+
+        let mr = unsafe {
+            stream.register_dmabuf_mr(0, dmabuf.size as usize, dmabuf.raw_fd, access as i32)?
+        };
+        mr
+    } else {
+        stream.register_mr(1024)?
+    };
+
+    Ok(mr)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
@@ -108,32 +129,11 @@ async fn main() -> anyhow::Result<()> {
     loop {
         let stream = listener.accept().await?;
         println!("Accepted connection!");
+        let mr = register_mr(&stream, &maybe_dmabuf)?;
+        println!("registered mr {mr:?}");
+        let len = mr.len();
 
-        let mr = if let Some(dmabuf) = &maybe_dmabuf {
-            let access = rdma_sys::ibv_access_flags::IBV_ACCESS_LOCAL_WRITE.0
-                | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_READ.0;
-            // | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_WRITE.0;
-
-            let mr = unsafe {
-                stream.register_dmabuf_mr(0, dmabuf.size as usize, dmabuf.raw_fd, access as i32)?
-            };
-
-            println!("registered mr {mr:?}");
-            mr
-        } else {
-            stream.register_mr(1024)?
-        };
-
-        let len = if let Some(_dmabuf) = &maybe_dmabuf {
-            1 << 30
-        } else {
-            1024
-        };
-        // Post recv concurrently
-        // let wc = stream.recv(mr.clone(), 0, len).await.unwrap();
-        // println!("{wc:?}");
-
-        let futures = (0..10).map(|_| stream.recv(mr.clone(), 0, len as u32));
+        let futures = (0..64).map(|_| stream.recv(mr.clone(), 0, len as u32));
         let results = futures::future::join_all(futures).await;
 
         for result in results {

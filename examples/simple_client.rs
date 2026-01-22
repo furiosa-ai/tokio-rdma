@@ -1,8 +1,13 @@
 use clap::Parser;
-use std::fs::OpenOptions;
 use std::net::SocketAddr;
+use std::os::fd::FromRawFd;
 use std::os::unix::io::AsRawFd;
-use tokio_rdma::RdmaStream;
+use std::sync::Arc;
+use std::{fs::OpenOptions, path::Path};
+use tokio_rdma::{MemoryRegion, RdmaStream};
+
+const NPU_BAR_IOCTL_MAGIC: u8 = b'N';
+const NPU_BAR_EXPORT_DMABUF: i32 = 0x01;
 
 #[repr(C, packed)]
 struct NpuDmabufRegion {
@@ -11,7 +16,12 @@ struct NpuDmabufRegion {
     fd: i32,
 }
 
-const NPU_BAR_EXPORT_DMABUF: u64 = 0xc0144e01;
+nix::ioctl_readwrite!(
+    ioctl_npu_bar_export_dmabuf,
+    NPU_BAR_IOCTL_MAGIC,
+    NPU_BAR_EXPORT_DMABUF,
+    NpuDmabufRegion
+);
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -26,7 +36,7 @@ struct Args {
     dmabuf_offset: u64,
 
     #[arg(long, default_value_t = 4096)]
-    dmabuf_size: u64,
+    dmabuf_size: usize,
 }
 
 struct FileDescriptor(i32);
@@ -37,6 +47,73 @@ impl Drop for FileDescriptor {
             unsafe { libc::close(self.0) };
         }
     }
+}
+
+struct DMABuf {
+    raw_fd: i32,
+    offset: u64,
+    size: usize,
+}
+
+impl DMABuf {
+    fn new(path: impl AsRef<Path>, offset: u64, size: usize) -> anyhow::Result<Self> {
+        let file = OpenOptions::new().read(true).write(true).open(path)?;
+
+        let mut region = NpuDmabufRegion {
+            offset,
+            size: size as u64,
+            fd: -1,
+        };
+
+        unsafe { ioctl_npu_bar_export_dmabuf(file.as_raw_fd(), &mut region)? };
+
+        let raw_fd = region.fd;
+        println!("Exported dmabuf fd: {}", raw_fd);
+        Ok(Self {
+            raw_fd,
+            offset,
+            size,
+        })
+    }
+
+    #[allow(dead_code)]
+    fn mmap(&self) -> anyhow::Result<memmap2::MmapMut> {
+        unsafe {
+            let file = std::fs::File::from_raw_fd(self.raw_fd);
+            Ok(memmap2::MmapOptions::new()
+                .len(self.size as usize)
+                .offset(self.offset)
+                .map_mut(&file)?)
+        }
+    }
+}
+
+impl Drop for DMABuf {
+    fn drop(&mut self) {
+        if self.raw_fd >= 0 {
+            unsafe { libc::close(self.raw_fd) };
+        }
+    }
+}
+
+fn register_mr(
+    stream: &RdmaStream,
+    maybe_dmabuf: &Option<DMABuf>,
+) -> anyhow::Result<Arc<MemoryRegion>> {
+    let mr = if let Some(dmabuf) = &maybe_dmabuf {
+        let access = rdma_sys::ibv_access_flags::IBV_ACCESS_LOCAL_WRITE.0
+            | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_READ.0;
+        // | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_WRITE.0;
+
+        let mr = unsafe {
+            stream.register_dmabuf_mr(0, dmabuf.size as usize, dmabuf.raw_fd, access as i32)?
+        };
+        mr
+    } else {
+        stream.register_mr(1024)?
+    };
+
+    Ok(mr)
 }
 
 #[tokio::main]
@@ -51,90 +128,31 @@ async fn main() -> anyhow::Result<()> {
     let stream = RdmaStream::connect(addr).await?;
     println!("Connected!");
 
-    // Helper to keep the fd alive if needed
-    let _dmabuf_fd_guard;
-
-    let mr = if let Some(path) = &args.dmabuf_dev {
-        println!("Using DMABUF from {}", path);
-        let file = OpenOptions::new().read(true).write(true).open(path)?;
-
-        let mut region = NpuDmabufRegion {
-            offset: args.dmabuf_offset,
-            size: args.dmabuf_size,
-            fd: -1,
-        };
-
-        let ret = unsafe {
-            libc::ioctl(
-                file.as_raw_fd(),
-                NPU_BAR_EXPORT_DMABUF as libc::c_ulong,
-                &mut region,
-            )
-        };
-        if ret != 0 {
-            anyhow::bail!("ioctl failed: {}", std::io::Error::last_os_error());
-        }
-
-        let fd = region.fd;
-        println!("Exported dmabuf fd: {}", fd);
-
-        let access = rdma_sys::ibv_access_flags::IBV_ACCESS_LOCAL_WRITE.0
-            | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_READ.0;
-        // | rdma_sys::ibv_access_flags::IBV_ACCESS_ZERO_BASED.0;
-        // | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_WRITE.0;
-
-        let mr =
-            unsafe { stream.register_dmabuf_mr(0, args.dmabuf_size as usize, fd, access as i32)? };
-
-        _dmabuf_fd_guard = Some(FileDescriptor(fd));
-        mr
+    // Pre-export dmabuf if needed
+    let maybe_dmabuf = if let Some(path) = &args.dmabuf_dev {
+        Some(DMABuf::new(&path, args.dmabuf_offset, args.dmabuf_size)?)
     } else {
         println!("Using Host Memory");
-        _dmabuf_fd_guard = None;
-
-        let mr = stream.register_mr(1024)?;
-        let msg = b"Hello High-Level RDMA!";
-
-        // TODO: use as_mut_slice()...
-        let addr = mr.addr() as *mut u8;
-        unsafe {
-            std::slice::from_raw_parts_mut(addr, msg.len()).copy_from_slice(msg);
-        }
-        mr
+        None
     };
 
-    println!("MR Registered. LKey: {}", mr.lkey());
+    let mr = register_mr(&stream, &maybe_dmabuf)?;
+    println!("MR Registered. {mr:?}");
 
-    let len = if args.dmabuf_dev.is_some() {
-        args.dmabuf_size as u32
-    } else {
-        22 // "Hello High-Level RDMA!".len()
-    };
-
+    let len = mr.len();
     let now = std::time::Instant::now();
 
-    // let requests: Vec<_> = (0..1).map(|_| (mr.clone(), 0, len)).collect();
-    // stream.send(mr.clone(), 0, len).await.unwrap();
-
-    let futures = (0..10).map(|_| stream.send(mr.clone(), 0, len));
+    let futures = (0..64).map(|_| stream.send(mr.clone(), 0, len as u32));
     let results = futures::future::join_all(futures).await;
+    let mut total_bytes = 0u64;
     for result in results {
         let wc = result?;
+        total_bytes += wc.wc.byte_len as u64;
         println!("Send completed: {wc:?}");
     }
 
     let elapsed = now.elapsed();
-    println!("for {}ms", elapsed.as_millis());
-
-    // let wc = stream.recv(&mr, 0, len).await?;
-
-    // let elapsed = now.elapsed();
-    // println!(
-    //     "Recv completed: {} {:?} for {}ms",
-    //     wc.wr_id,
-    //     wc.status,
-    //     elapsed.as_millis()
-    // );
-
+    let gibps = total_bytes as f64 / elapsed.as_nanos() as f64;
+    println!("for {}ms {}GiB/s", elapsed.as_millis(), gibps);
     Ok(())
 }

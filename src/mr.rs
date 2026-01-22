@@ -4,11 +4,16 @@ use rdma_sys::*;
 use std::ffi::c_void;
 use std::sync::Arc;
 
-#[derive(Debug)]
 pub struct MemoryRegion {
     pub(crate) mr: *mut ibv_mr,
     _pd: Arc<ProtectionDomain>,
     _data: Option<Vec<u8>>, // Only present if we own the allocation
+}
+
+impl std::fmt::Debug for MemoryRegion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        unsafe { *self.mr }.fmt(f)
+    }
 }
 
 impl MemoryRegion {
@@ -105,6 +110,10 @@ impl MemoryRegion {
 
     pub unsafe fn as_mut_slice(&mut self) -> &mut [u8] {
         unsafe { std::slice::from_raw_parts_mut((*self.mr).addr as *mut u8, (*self.mr).length) }
+    }
+
+    pub fn len(&self) -> usize {
+        unsafe { *self.mr }.length
     }
 }
 

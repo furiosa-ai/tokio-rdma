@@ -154,10 +154,6 @@ impl RdmaStream {
                     .map(|(mr, offset, len)| (mr.as_ref(), *offset, *len))
                     .collect();
 
-                let dur = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap();
-                println!("post_send_multi {}", dur.as_nanos());
                 if let Err(e) = unsafe { qp.post_send_multi(reqs, *wr_id, true) } {
                     tx.send(Err(e)).unwrap();
                 } else {
