@@ -1,27 +1,10 @@
 use clap::Parser;
 use std::net::SocketAddr;
-use std::os::fd::FromRawFd;
-use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
-use std::{fs::OpenOptions, path::Path};
 use tokio_rdma::{MemoryRegion, RdmaListener, RdmaStream};
 
-const NPU_BAR_IOCTL_MAGIC: u8 = b'N';
-const NPU_BAR_EXPORT_DMABUF: i32 = 0x01;
-
-#[repr(C, packed)]
-struct NpuDmabufRegion {
-    offset: u64,
-    size: u64,
-    fd: i32,
-}
-
-nix::ioctl_readwrite!(
-    ioctl_npu_bar_export_dmabuf,
-    NPU_BAR_IOCTL_MAGIC,
-    NPU_BAR_EXPORT_DMABUF,
-    NpuDmabufRegion
-);
+mod common;
+use crate::common::DMABuf;
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -37,53 +20,6 @@ struct Args {
 
     #[arg(long, default_value_t = 4096)]
     dmabuf_size: usize,
-}
-
-struct DMABuf {
-    raw_fd: i32,
-    offset: u64,
-    size: usize,
-}
-
-impl DMABuf {
-    fn new(path: impl AsRef<Path>, offset: u64, size: usize) -> anyhow::Result<Self> {
-        let file = OpenOptions::new().read(true).write(true).open(path)?;
-
-        let mut region = NpuDmabufRegion {
-            offset,
-            size: size as u64,
-            fd: -1,
-        };
-
-        unsafe { ioctl_npu_bar_export_dmabuf(file.as_raw_fd(), &mut region)? };
-
-        let raw_fd = region.fd;
-        println!("Exported dmabuf fd: {}", raw_fd);
-        Ok(Self {
-            raw_fd,
-            offset,
-            size,
-        })
-    }
-
-    #[allow(dead_code)]
-    fn mmap(&self) -> anyhow::Result<memmap2::MmapMut> {
-        unsafe {
-            let file = std::fs::File::from_raw_fd(self.raw_fd);
-            Ok(memmap2::MmapOptions::new()
-                .len(self.size as usize)
-                .offset(self.offset)
-                .map_mut(&file)?)
-        }
-    }
-}
-
-impl Drop for DMABuf {
-    fn drop(&mut self) {
-        if self.raw_fd >= 0 {
-            unsafe { libc::close(self.raw_fd) };
-        }
-    }
 }
 
 fn register_mr(
