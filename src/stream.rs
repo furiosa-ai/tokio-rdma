@@ -55,9 +55,36 @@ impl Drop for RdmaStream {
     }
 }
 
+#[derive(Default)]
+pub struct RdmaBuilder {
+    src_addr: Option<SocketAddr>,
+}
+
+impl RdmaBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn bind_src(mut self, addr: SocketAddr) -> Self {
+        self.src_addr = Some(addr);
+        self
+    }
+
+    pub async fn connect(self, addr: SocketAddr) -> Result<RdmaStream> {
+        RdmaStream::connect_internal(self.src_addr, addr).await
+    }
+}
+
 impl RdmaStream {
-    pub async fn connect(addr: SocketAddr) -> Result<Self> {
-        tracing::debug!("Connecting to {}", addr);
+    pub fn builder() -> RdmaBuilder {
+        RdmaBuilder::new()
+    }
+
+    pub(crate) async fn connect_internal(
+        src_addr: Option<SocketAddr>,
+        dst_addr: SocketAddr,
+    ) -> Result<Self> {
+        tracing::debug!("Connecting to {}", dst_addr);
 
         // 1. Setup Channel & ID
         let channel = Arc::new(CmEventChannel::new()?);
@@ -65,7 +92,7 @@ impl RdmaStream {
 
         // 2. Resolve Address
         tracing::debug!("Resolving address...");
-        id.resolve_addr(addr)?;
+        id.resolve_addr(src_addr, dst_addr)?;
         let event = channel.get_event().await?;
         if event.event_type() != rdma_cm_event_type::RDMA_CM_EVENT_ADDR_RESOLVED {
             return Err(RdmaError::Rdma(format!(
@@ -126,6 +153,10 @@ impl RdmaStream {
             poller_handle,
             tx,
         })
+    }
+
+    pub async fn connect(addr: SocketAddr) -> Result<Self> {
+        Self::connect_internal(None, addr).await
     }
 
     fn handle_completion(works: &mut HashMap<u64, oneshot::Sender<Result<ibv_wc>>>, wc: ibv_wc) {

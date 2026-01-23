@@ -15,4 +15,4 @@ pub use error::RdmaError;
 pub use mr::MemoryRegion;
 pub use pd::ProtectionDomain;
 pub use qp::{QpInitAttr, QueuePair};
-pub use stream::{RdmaListener, RdmaStream};
+pub use stream::{RdmaBuilder, RdmaListener, RdmaStream};

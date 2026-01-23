@@ -4,7 +4,7 @@ use std::os::fd::FromRawFd;
 use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 use std::{fs::OpenOptions, path::Path};
-use tokio_rdma::{MemoryRegion, RdmaStream};
+use tokio_rdma::{MemoryRegion, RdmaBuilder, RdmaStream};
 
 const NPU_BAR_IOCTL_MAGIC: u8 = b'N';
 const NPU_BAR_EXPORT_DMABUF: i32 = 0x01;
@@ -28,6 +28,10 @@ struct Args {
     #[arg(short, long, default_value = "127.0.0.1:8080")]
     addr: String,
 
+    /// Local address to bind to
+    #[arg(long)]
+    bind_addr: Option<String>,
+
     /// Path to the dmabuf device (enables dmabuf mode)
     #[arg(long)]
     dmabuf_dev: Option<String>,
@@ -37,16 +41,6 @@ struct Args {
 
     #[arg(long, default_value_t = 4096)]
     dmabuf_size: usize,
-}
-
-struct FileDescriptor(i32);
-
-impl Drop for FileDescriptor {
-    fn drop(&mut self) {
-        if self.0 >= 0 {
-            unsafe { libc::close(self.0) };
-        }
-    }
 }
 
 struct DMABuf {
@@ -124,8 +118,16 @@ async fn main() -> anyhow::Result<()> {
     args.dmabuf_size = 1 << 30;
 
     let addr: SocketAddr = args.addr.parse()?;
-    println!("Connecting to {}...", addr);
-    let stream = RdmaStream::connect(addr).await?;
+    let mut builder = RdmaBuilder::new();
+    if let Some(bind_addr) = &args.bind_addr {
+        let local_addr: SocketAddr = bind_addr.parse()?;
+        builder = builder.bind_src(local_addr);
+        println!("Connecting to {} from {}...", addr, local_addr);
+    } else {
+        println!("Connecting to {}...", addr);
+    }
+
+    let stream = builder.connect(addr).await?;
     println!("Connected!");
 
     // Pre-export dmabuf if needed
@@ -152,7 +154,12 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let elapsed = now.elapsed();
-    let gibps = total_bytes as f64 / elapsed.as_nanos() as f64;
-    println!("for {}ms {}GiB/s", elapsed.as_millis(), gibps);
+    let bw = total_bytes as f64 / elapsed.as_nanos() as f64;
+    println!(
+        "transfered {} bytes for {}ms {}GiB/s",
+        total_bytes,
+        elapsed.as_millis(),
+        bw
+    );
     Ok(())
 }

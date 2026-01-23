@@ -170,11 +170,17 @@ impl CmId {
         Ok(())
     }
 
-    pub fn resolve_addr(&self, addr: SocketAddr) -> Result<()> {
-        let sockaddr = socket2::SockAddr::from(addr);
-        let ret = unsafe {
-            rdma_resolve_addr(self.id, ptr::null_mut(), sockaddr.as_ptr() as *mut _, 2000)
+    pub fn resolve_addr(&self, src_addr: Option<SocketAddr>, dst_addr: SocketAddr) -> Result<()> {
+        let dst_sockaddr = socket2::SockAddr::from(dst_addr);
+        let src_sockaddr = src_addr.map(socket2::SockAddr::from);
+
+        let src_ptr = match &src_sockaddr {
+            Some(s) => s.as_ptr() as *mut _,
+            None => ptr::null_mut(),
         };
+
+        let ret =
+            unsafe { rdma_resolve_addr(self.id, src_ptr, dst_sockaddr.as_ptr() as *mut _, 2000) };
         if ret != 0 {
             let errno = unsafe { *libc::__errno_location() };
             return Err(RdmaError::Rdma(format!(
