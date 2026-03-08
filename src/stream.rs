@@ -259,8 +259,12 @@ impl RdmaStream {
             let mut works = HashMap::new();
             loop {
                 tokio::select! {
-                    maybe_request = request_receiver.recv() =>
-                        Self::handle_request(maybe_request.unwrap(), &mut works, qp.clone(), &mut wr_id),
+                    maybe_request = request_receiver.recv() => {
+                        match maybe_request {
+                            Some(req) => Self::handle_request(req, &mut works, qp.clone(), &mut wr_id),
+                            None => break,
+                        }
+                    },
                     maybe_wc = cq.poll() =>
                     {
                         match maybe_wc {
@@ -291,7 +295,10 @@ impl RdmaStream {
         requests: Vec<(Arc<MemoryRegion>, u64, u32)>,
     ) -> Result<WorkCompletion> {
         let (tx, rx) = oneshot::channel();
-        self.tx.send(Request::Recv(tx, requests)).await.unwrap();
+        self.tx
+            .send(Request::Recv(tx, requests))
+            .await
+            .map_err(|_| RdmaError::Rdma("Stream poller task is closed".to_string()))?;
         let wc = rx.await??;
         Ok(WorkCompletion { wc })
     }
@@ -306,7 +313,7 @@ impl RdmaStream {
         self.tx
             .send(Request::Send(tx, vec![(mr, offset, len)]))
             .await
-            .unwrap();
+            .map_err(|_| RdmaError::Rdma("Stream poller task is closed".to_string()))?;
         let wc = rx.await??;
         Ok(WorkCompletion { wc })
     }
@@ -321,7 +328,7 @@ impl RdmaStream {
         self.tx
             .send(Request::Recv(tx, vec![(mr, offset, len)]))
             .await
-            .unwrap();
+            .map_err(|_| RdmaError::Rdma("Stream poller task is closed".to_string()))?;
         let wc = rx.await??;
         Ok(WorkCompletion { wc })
     }
@@ -364,7 +371,7 @@ impl RdmaStream {
                 rkey,
             ))
             .await
-            .unwrap();
+            .map_err(|_| RdmaError::Rdma("Stream poller task is closed".to_string()))?;
         let wc = rx.await??;
         Ok(WorkCompletion { wc })
     }
@@ -373,7 +380,7 @@ impl RdmaStream {
         MemoryRegion::register(self.pd.clone(), len)
     }
 
-    pub unsafe fn register_dmabuf_mr(
+    pub fn register_dmabuf_mr(
         &self,
         dmabuf: &impl crate::mr::AsDmaBuf,
         access: i32,

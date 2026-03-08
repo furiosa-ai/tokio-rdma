@@ -117,7 +117,7 @@ impl MemoryRegion {
         unsafe { std::slice::from_raw_parts((*self.mr).addr as *const u8, (*self.mr).length) }
     }
 
-    pub unsafe fn as_mut_slice(&mut self) -> &mut [u8] {
+    pub unsafe fn as_mut_slice(&self) -> &mut [u8] {
         unsafe { std::slice::from_raw_parts_mut((*self.mr).addr as *mut u8, (*self.mr).length) }
     }
 
