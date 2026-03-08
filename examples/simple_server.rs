@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tokio_rdma::{MemoryRegion, RdmaListener, RdmaStream};
 
 mod common;
-use crate::common::DMABuf;
+use crate::common::NpuDmaBuf;
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -24,7 +24,7 @@ struct Args {
 
 fn register_mr(
     stream: &RdmaStream,
-    maybe_dmabuf: &Option<DMABuf>,
+    maybe_dmabuf: &Option<NpuDmaBuf>,
 ) -> anyhow::Result<Arc<MemoryRegion>> {
     let mr = if let Some(dmabuf) = &maybe_dmabuf {
         let access = rdma_sys::ibv_access_flags::IBV_ACCESS_LOCAL_WRITE.0
@@ -54,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Pre-export dmabuf if needed
     let maybe_dmabuf = if let Some(path) = &args.dmabuf_dev {
-        Some(DMABuf::new(&path, args.dmabuf_offset, args.dmabuf_size)?)
+        Some(NpuDmaBuf::new(&path, args.dmabuf_offset, args.dmabuf_size)?)
     } else {
         println!("Using Host Memory");
         None

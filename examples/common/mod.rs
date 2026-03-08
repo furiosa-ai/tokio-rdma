@@ -20,19 +20,19 @@ nix::ioctl_readwrite!(
     NpuDmabufRegion
 );
 
-pub struct DMABuf {
+pub struct NpuDmaBuf {
     pub raw_fd: i32,
     pub offset: u64,
     pub size: usize,
 }
 
-impl AsRawFd for DMABuf {
+impl AsRawFd for NpuDmaBuf {
     fn as_raw_fd(&self) -> RawFd {
         self.raw_fd
     }
 }
 
-impl DmaBuf for DMABuf {
+impl DmaBuf for NpuDmaBuf {
     fn dmabuf_offset(&self) -> u64 {
         self.offset
     }
@@ -42,7 +42,7 @@ impl DmaBuf for DMABuf {
     }
 }
 
-impl DMABuf {
+impl NpuDmaBuf {
     pub fn new(path: impl AsRef<Path>, offset: u64, size: usize) -> anyhow::Result<Self> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
 
@@ -75,7 +75,7 @@ impl DMABuf {
     }
 }
 
-impl Drop for DMABuf {
+impl Drop for NpuDmaBuf {
     fn drop(&mut self) {
         if self.raw_fd >= 0 {
             unsafe { libc::close(self.raw_fd) };
