@@ -12,7 +12,7 @@ pub use cm::{CmEvent, CmEventChannel, CmId};
 pub use cq::CompletionQueue;
 pub use device::{Device, DeviceList};
 pub use error::RdmaError;
-pub use mr::{DmaBuffer, MemoryRegion};
+pub use mr::{DmaBuf, MemoryRegion};
 pub use pd::ProtectionDomain;
 pub use qp::{QpInitAttr, QueuePair};
 pub use stream::{RdmaBuilder, RdmaListener, RdmaStream};

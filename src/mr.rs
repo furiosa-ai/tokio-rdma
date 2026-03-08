@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use std::os::fd::AsRawFd;
 
-pub trait DmaBuffer: AsRawFd {
+pub trait DmaBuf: AsRawFd {
     fn dmabuf_offset(&self) -> u64;
     fn dmabuf_length(&self) -> usize;
 }
@@ -48,7 +48,7 @@ impl MemoryRegion {
 
     pub fn register_dmabuf(
         pd: Arc<ProtectionDomain>,
-        dmabuf: &impl DmaBuffer,
+        dmabuf: &impl DmaBuf,
         access: i32,
     ) -> Result<Arc<Self>> {
         let mr = unsafe {

@@ -1,7 +1,7 @@
 use std::os::fd::FromRawFd;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::{fs::OpenOptions, path::Path};
-use tokio_rdma::DmaBuffer;
+use tokio_rdma::DmaBuf;
 
 const NPU_BAR_IOCTL_MAGIC: u8 = b'N';
 const NPU_BAR_EXPORT_DMABUF: i32 = 0x01;
@@ -32,7 +32,7 @@ impl AsRawFd for DMABuf {
     }
 }
 
-impl DmaBuffer for DMABuf {
+impl DmaBuf for DMABuf {
     fn dmabuf_offset(&self) -> u64 {
         self.offset
     }

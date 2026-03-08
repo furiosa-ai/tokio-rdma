@@ -382,7 +382,7 @@ impl RdmaStream {
 
     pub fn register_dmabuf_mr(
         &self,
-        dmabuf: &impl crate::mr::DmaBuffer,
+        dmabuf: &impl crate::mr::DmaBuf,
         access: i32,
     ) -> Result<Arc<MemoryRegion>> {
         MemoryRegion::register_dmabuf(self.pd.clone(), dmabuf, access)
