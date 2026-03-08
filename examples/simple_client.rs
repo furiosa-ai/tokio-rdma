@@ -32,8 +32,8 @@ fn register_mr(
 ) -> anyhow::Result<Arc<MemoryRegion>> {
     let mr = if let Some(dmabuf) = &maybe_dmabuf {
         let access = rdma_sys::ibv_access_flags::IBV_ACCESS_LOCAL_WRITE.0
-            | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_READ.0;
-        // | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_WRITE.0;
+            | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_READ.0
+            | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_WRITE.0;
 
         let mr = stream.register_dmabuf_mr(dmabuf, access as i32)?;
         mr
@@ -48,7 +48,6 @@ fn register_mr(
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let mut args = Args::parse();
-    args.dmabuf_size = 1 << 30;
 
     let addr: SocketAddr = args.addr.parse()?;
     let mut builder = RdmaBuilder::new();

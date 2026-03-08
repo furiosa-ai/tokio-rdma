@@ -28,8 +28,8 @@ fn register_mr(
 ) -> anyhow::Result<Arc<MemoryRegion>> {
     let mr = if let Some(dmabuf) = &maybe_dmabuf {
         let access = rdma_sys::ibv_access_flags::IBV_ACCESS_LOCAL_WRITE.0
-            | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_READ.0;
-        // | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_WRITE.0;
+            | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_READ.0
+            | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_WRITE.0;
 
         let mr = stream.register_dmabuf_mr(dmabuf, access as i32)?;
         mr
@@ -49,8 +49,6 @@ async fn main() -> anyhow::Result<()> {
     println!("Binding to {}...", addr);
     let listener = RdmaListener::bind(addr).await?;
     println!("Listening...");
-
-    args.dmabuf_size = 1 << 30;
 
     // Pre-export dmabuf if needed
     let maybe_dmabuf = if let Some(path) = &args.dmabuf_dev {
