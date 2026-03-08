@@ -1,6 +1,7 @@
 use std::os::fd::FromRawFd;
-use std::os::unix::io::AsRawFd;
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::{fs::OpenOptions, path::Path};
+use tokio_rdma::AsDmaBuf;
 
 const NPU_BAR_IOCTL_MAGIC: u8 = b'N';
 const NPU_BAR_EXPORT_DMABUF: i32 = 0x01;
@@ -23,6 +24,22 @@ pub struct DMABuf {
     pub raw_fd: i32,
     pub offset: u64,
     pub size: usize,
+}
+
+impl AsRawFd for DMABuf {
+    fn as_raw_fd(&self) -> RawFd {
+        self.raw_fd
+    }
+}
+
+impl AsDmaBuf for DMABuf {
+    fn dmabuf_offset(&self) -> u64 {
+        self.offset
+    }
+
+    fn dmabuf_length(&self) -> usize {
+        self.size
+    }
 }
 
 impl DMABuf {

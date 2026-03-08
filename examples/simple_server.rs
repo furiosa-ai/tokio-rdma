@@ -31,9 +31,7 @@ fn register_mr(
             | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_READ.0;
         // | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_WRITE.0;
 
-        let mr = unsafe {
-            stream.register_dmabuf_mr(0, dmabuf.size as usize, dmabuf.raw_fd, access as i32)?
-        };
+        let mr = unsafe { stream.register_dmabuf_mr(dmabuf, access as i32)? };
         mr
     } else {
         stream.register_mr(1024)?

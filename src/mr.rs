@@ -4,6 +4,13 @@ use rdma_sys::*;
 use std::ffi::c_void;
 use std::sync::Arc;
 
+use std::os::fd::AsRawFd;
+
+pub trait AsDmaBuf: AsRawFd {
+    fn dmabuf_offset(&self) -> u64;
+    fn dmabuf_length(&self) -> usize;
+}
+
 pub struct MemoryRegion {
     pub(crate) mr: *mut ibv_mr,
     _pd: Arc<ProtectionDomain>,
@@ -41,15 +48,17 @@ impl MemoryRegion {
 
     pub fn register_dmabuf(
         pd: Arc<ProtectionDomain>,
-        offset: u64,
-        len: usize,
-        fd: i32,
+        dmabuf: &impl AsDmaBuf,
         access: i32,
     ) -> Result<Arc<Self>> {
         let mr = unsafe {
             ibv_reg_dmabuf_mr(
-                pd.pd, offset, len, 0, // iova
-                fd, access,
+                pd.pd,
+                dmabuf.dmabuf_offset(),
+                dmabuf.dmabuf_length(),
+                0, // iova
+                dmabuf.as_raw_fd(),
+                access,
             )
         };
 

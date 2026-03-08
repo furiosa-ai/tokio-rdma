@@ -375,12 +375,10 @@ impl RdmaStream {
 
     pub unsafe fn register_dmabuf_mr(
         &self,
-        offset: u64,
-        len: usize,
-        fd: i32,
+        dmabuf: &impl crate::mr::AsDmaBuf,
         access: i32,
     ) -> Result<Arc<MemoryRegion>> {
-        MemoryRegion::register_dmabuf(self.pd.clone(), offset, len, fd, access)
+        MemoryRegion::register_dmabuf(self.pd.clone(), dmabuf, access)
     }
 }
 
