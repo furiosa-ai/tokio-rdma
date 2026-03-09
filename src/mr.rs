@@ -56,7 +56,7 @@ impl MemoryRegion {
                 pd.pd,
                 dmabuf.dmabuf_offset(),
                 dmabuf.dmabuf_length(),
-                0, // iova
+                dmabuf.dmabuf_offset(), // iova
                 dmabuf.as_raw_fd(),
                 access,
             )
