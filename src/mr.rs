@@ -6,15 +6,30 @@ use std::sync::Arc;
 
 use std::os::fd::AsRawFd;
 
-pub trait DmaBuf: AsRawFd {
-    fn dmabuf_offset(&self) -> u64;
-    fn dmabuf_length(&self) -> usize;
+enum MemoryRegionData {
+    Vec(Vec<u8>),
+    DmaBuf(DmaBuf),
+}
+
+pub struct DmaBuf {
+    file: std::fs::File,
+    len: usize,
+}
+
+impl DmaBuf {
+    pub fn new(file: std::fs::File, len: usize) -> Self {
+        Self { file, len }
+    }
+
+    fn mmap(&self) -> Result<memmap2::Mmap> {
+        unsafe { Ok(memmap2::Mmap::map(&self.file)?) }
+    }
 }
 
 pub struct MemoryRegion {
     pub(crate) mr: *mut ibv_mr,
     _pd: Arc<ProtectionDomain>,
-    _data: Option<Vec<u8>>, // Only present if we own the allocation
+    _data: MemoryRegionData,
 }
 
 impl std::fmt::Debug for MemoryRegion {
@@ -32,6 +47,7 @@ impl MemoryRegion {
         access: i32,
     ) -> Result<Self> {
         let mr = unsafe { ibv_reg_mr(pd.pd, addr, len, access) };
+        let data = unsafe { Vec::from_raw_parts(addr as *mut u8, len, len) };
         if mr.is_null() {
             let errno = unsafe { *libc::__errno_location() };
             return Err(RdmaError::Rdma(format!(
@@ -42,22 +58,23 @@ impl MemoryRegion {
         Ok(Self {
             mr,
             _pd: pd,
-            _data: None,
+            _data: MemoryRegionData::Vec(data),
         })
     }
 
     pub fn register_dmabuf(
         pd: Arc<ProtectionDomain>,
-        dmabuf: &impl DmaBuf,
+        dmabuf: DmaBuf,
+        offset: u64,
         access: i32,
     ) -> Result<Arc<Self>> {
         let mr = unsafe {
             ibv_reg_dmabuf_mr(
                 pd.pd,
-                dmabuf.dmabuf_offset(),
-                dmabuf.dmabuf_length(),
-                dmabuf.dmabuf_offset(), // iova
-                dmabuf.as_raw_fd(),
+                offset,
+                dmabuf.len,
+                0, // dmabuf.dmabuf_offset(), // iova
+                dmabuf.file.as_raw_fd(),
                 access,
             )
         };
@@ -73,17 +90,23 @@ impl MemoryRegion {
         Ok(Arc::new(Self {
             mr,
             _pd: pd,
-            _data: None,
+            _data: MemoryRegionData::DmaBuf(dmabuf),
         }))
     }
 
-    pub fn register(pd: Arc<ProtectionDomain>, len: usize) -> Result<Arc<Self>> {
-        let mut data = vec![0u8; len];
-        let access = ibv_access_flags::IBV_ACCESS_LOCAL_WRITE.0
-            | ibv_access_flags::IBV_ACCESS_REMOTE_WRITE.0
-            | ibv_access_flags::IBV_ACCESS_REMOTE_READ.0;
-
-        let mr = unsafe { ibv_reg_mr(pd.pd, data.as_mut_ptr() as *mut c_void, len, access as i32) };
+    pub fn register(
+        pd: Arc<ProtectionDomain>,
+        mut data: Vec<u8>,
+        access: i32,
+    ) -> Result<Arc<Self>> {
+        let mr = unsafe {
+            ibv_reg_mr(
+                pd.pd,
+                data.as_mut_ptr() as *mut c_void,
+                data.len(),
+                access as i32,
+            )
+        };
 
         if mr.is_null() {
             let errno = unsafe { *libc::__errno_location() };
@@ -96,7 +119,7 @@ impl MemoryRegion {
         Ok(Arc::new(Self {
             mr,
             _pd: pd,
-            _data: Some(data),
+            _data: MemoryRegionData::Vec(data),
         }))
     }
 
@@ -123,6 +146,18 @@ impl MemoryRegion {
 
     pub fn len(&self) -> usize {
         unsafe { *self.mr }.length
+    }
+
+    pub fn data(&self) -> Result<Vec<u8>> {
+        match &self._data {
+            crate::mr::MemoryRegionData::Vec(data) => Ok(data.clone()),
+            crate::mr::MemoryRegionData::DmaBuf(dmabuf) => {
+                let mmap = dmabuf.mmap()?;
+                let mut ret = Vec::new();
+                mmap.clone_into(&mut ret);
+                Ok(ret)
+            }
+        }
     }
 }
 

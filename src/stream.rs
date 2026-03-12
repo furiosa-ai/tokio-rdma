@@ -376,16 +376,17 @@ impl RdmaStream {
         Ok(WorkCompletion { wc })
     }
 
-    pub fn register_mr(&self, len: usize) -> Result<Arc<MemoryRegion>> {
-        MemoryRegion::register(self.pd.clone(), len)
+    pub fn register_mr(&self, data: Vec<u8>, access: i32) -> Result<Arc<MemoryRegion>> {
+        MemoryRegion::register(self.pd.clone(), data, access)
     }
 
     pub fn register_dmabuf_mr(
         &self,
-        dmabuf: &impl crate::mr::DmaBuf,
+        dmabuf: crate::DmaBuf,
+        offset: u64,
         access: i32,
     ) -> Result<Arc<MemoryRegion>> {
-        MemoryRegion::register_dmabuf(self.pd.clone(), dmabuf, access)
+        MemoryRegion::register_dmabuf(self.pd.clone(), dmabuf, offset, access)
     }
 }
 

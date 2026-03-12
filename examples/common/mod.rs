@@ -1,5 +1,5 @@
 use std::os::fd::FromRawFd;
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::io::AsRawFd;
 use std::{fs::OpenOptions, path::Path};
 use tokio_rdma::DmaBuf;
 
@@ -20,65 +20,24 @@ nix::ioctl_readwrite!(
     NpuDmabufRegion
 );
 
-pub struct NpuDmaBuf {
-    pub raw_fd: i32,
-    pub offset: u64,
-    pub size: usize,
-}
+pub fn create_npu_dmabuf(
+    path: impl AsRef<Path>,
+    offset: u64,
+    size: usize,
+) -> anyhow::Result<DmaBuf> {
+    let file = OpenOptions::new().read(true).write(true).open(path)?;
 
-impl AsRawFd for NpuDmaBuf {
-    fn as_raw_fd(&self) -> RawFd {
-        self.raw_fd
-    }
-}
+    let npu_default_offset = 256u64 << 20;
+    let mut region = NpuDmabufRegion {
+        offset: offset + npu_default_offset,
+        size: size as u64,
+        fd: -1,
+    };
 
-impl DmaBuf for NpuDmaBuf {
-    fn dmabuf_offset(&self) -> u64 {
-        self.offset
-    }
+    unsafe { ioctl_npu_bar_export_dmabuf(file.as_raw_fd(), &mut region)? };
 
-    fn dmabuf_length(&self) -> usize {
-        self.size
-    }
-}
-
-impl NpuDmaBuf {
-    pub fn new(path: impl AsRef<Path>, offset: u64, size: usize) -> anyhow::Result<Self> {
-        let file = OpenOptions::new().read(true).write(true).open(path)?;
-
-        let mut region = NpuDmabufRegion {
-            offset,
-            size: size as u64,
-            fd: -1,
-        };
-
-        unsafe { ioctl_npu_bar_export_dmabuf(file.as_raw_fd(), &mut region)? };
-
-        let raw_fd = region.fd;
-        println!("Exported dmabuf fd: {}", raw_fd);
-        Ok(Self {
-            raw_fd,
-            offset,
-            size,
-        })
-    }
-
-    #[allow(dead_code)]
-    fn mmap(&self) -> anyhow::Result<memmap2::MmapMut> {
-        unsafe {
-            let file = std::fs::File::from_raw_fd(self.raw_fd);
-            Ok(memmap2::MmapOptions::new()
-                .len(self.size as usize)
-                .offset(self.offset)
-                .map_mut(&file)?)
-        }
-    }
-}
-
-impl Drop for NpuDmaBuf {
-    fn drop(&mut self) {
-        if self.raw_fd >= 0 {
-            unsafe { libc::close(self.raw_fd) };
-        }
-    }
+    let raw_fd = region.fd;
+    println!("Exported dmabuf fd: {}", raw_fd);
+    let dmabuf_file = unsafe { std::fs::File::from_raw_fd(raw_fd) };
+    Ok(DmaBuf::new(dmabuf_file, size))
 }

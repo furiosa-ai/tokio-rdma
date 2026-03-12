@@ -1,10 +1,8 @@
 use clap::Parser;
 use std::net::SocketAddr;
-use std::sync::Arc;
-use tokio_rdma::{MemoryRegion, RdmaBuilder, RdmaStream};
+use tokio_rdma::RdmaBuilder;
 
 mod common;
-use crate::common::NpuDmaBuf;
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -19,35 +17,17 @@ struct Args {
     #[arg(long)]
     dmabuf_dev: Option<String>,
 
-    #[arg(long, default_value_t = 268435456)]
+    #[arg(long, default_value_t = 0)]
     dmabuf_offset: u64,
 
     #[arg(long, default_value_t = 4096)]
-    dmabuf_size: usize,
-}
-
-fn register_mr(
-    stream: &RdmaStream,
-    maybe_dmabuf: &Option<NpuDmaBuf>,
-) -> anyhow::Result<Arc<MemoryRegion>> {
-    let mr = if let Some(dmabuf) = &maybe_dmabuf {
-        let access = rdma_sys::ibv_access_flags::IBV_ACCESS_LOCAL_WRITE.0
-            | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_READ.0
-            | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_WRITE.0;
-
-        let mr = stream.register_dmabuf_mr(dmabuf, access as i32)?;
-        mr
-    } else {
-        stream.register_mr(1024)?
-    };
-
-    Ok(mr)
+    buffer_size: usize,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
-    let mut args = Args::parse();
+    let args = Args::parse();
 
     let addr: SocketAddr = args.addr.parse()?;
     let mut builder = RdmaBuilder::new();
@@ -62,26 +42,32 @@ async fn main() -> anyhow::Result<()> {
     let stream = builder.connect(addr).await?;
     println!("Connected!");
 
+    let access = rdma_sys::ibv_access_flags::IBV_ACCESS_LOCAL_WRITE.0
+        | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_READ.0
+        | rdma_sys::ibv_access_flags::IBV_ACCESS_REMOTE_WRITE.0;
+
     // Pre-export dmabuf if needed
-    let maybe_dmabuf = if let Some(path) = &args.dmabuf_dev {
-        Some(NpuDmaBuf::new(&path, args.dmabuf_offset, args.dmabuf_size)?)
+    let mr = if let Some(path) = &args.dmabuf_dev {
+        let dmabuf =
+            common::create_npu_dmabuf(&path, args.dmabuf_offset, args.buffer_size).unwrap();
+        stream.register_dmabuf_mr(dmabuf, 0, access as i32).unwrap()
     } else {
         println!("Using Host Memory");
-        None
+        let data = vec![77u8; args.buffer_size];
+        stream.register_mr(data, access as i32).unwrap()
     };
 
-    let mr = register_mr(&stream, &maybe_dmabuf)?;
     println!("MR Registered. {mr:?}");
 
     let len = mr.len();
     let now = std::time::Instant::now();
 
-    let futures = (0..64).map(|_| stream.send(mr.clone(), 0, len as u32));
+    let futures = (0..1).map(|_| stream.send(mr.clone(), 0, len as u32));
     let results = futures::future::join_all(futures).await;
     let mut total_bytes = 0u64;
     for result in results {
         let wc = result?;
-        total_bytes += wc.wc.byte_len as u64;
+        total_bytes += len as u64;
         println!("Send completed: {wc:?}");
     }
 
