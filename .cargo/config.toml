@@ -1,0 +1,2 @@
+[env]
+PKG_CONFIG_PATH = { value = "../rdma-core/build/lib/pkgconfig", relative = true }
