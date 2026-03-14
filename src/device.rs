@@ -78,6 +78,11 @@ impl Device {
 
     /// Creates a Device wrapper around an existing context.
     /// The context will NOT be closed when this Device is dropped.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `context` and `raw` are valid pointers to `ibv_context` and
+    /// `ibv_device` and that they stay valid for the lifetime of the returned `Device`.
     pub unsafe fn from_context(context: *mut ibv_context, raw: *mut ibv_device) -> Self {
         Self {
             raw,

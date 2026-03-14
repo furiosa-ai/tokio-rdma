@@ -23,6 +23,12 @@ pub struct QpInitAttr {
 }
 
 impl QueuePair {
+    /// Creates a new Queue Pair associated with a CM ID.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `cm_id` is a valid pointer to a `rdma_cm_id` and that it stays
+    /// valid for the duration of this call.
     pub fn new_cm(
         pd: Arc<ProtectionDomain>,
         cm_id: *mut rdma_cm_id,
@@ -159,6 +165,12 @@ impl QueuePair {
         Ok(())
     }
 
+    /// Posts a receive request.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the memory regions stay valid until the completion event is
+    /// received.
     pub unsafe fn post_recv_multi(
         &self,
         req: Vec<(&MemoryRegion, u64, u32)>,
@@ -190,6 +202,12 @@ impl QueuePair {
         Ok(())
     }
 
+    /// Posts a send request.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the memory regions stay valid until the completion event is
+    /// received.
     pub unsafe fn post_send_multi(
         &self,
         req: Vec<(&MemoryRegion, u64, u32)>,
@@ -228,6 +246,12 @@ impl QueuePair {
         Ok(())
     }
 
+    /// Posts an RDMA request.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the memory regions stay valid until the completion event is
+    /// received.
     pub unsafe fn post_rdma(
         &self,
         req: Vec<(&MemoryRegion, u64, u32)>,

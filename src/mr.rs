@@ -40,6 +40,11 @@ impl std::fmt::Debug for MemoryRegion {
 
 impl MemoryRegion {
     /// Registers an existing memory block (e.g. mmap'd P2P memory)
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `addr` and `len` define a valid memory region and that it stays
+    /// valid for the lifetime of the returned `MemoryRegion`.
     pub unsafe fn register_user(
         pd: Arc<ProtectionDomain>,
         addr: *mut c_void,
@@ -136,10 +141,22 @@ impl MemoryRegion {
     }
 
     // Unsafe access to underlying buffer
+    /// Returns the memory region as a slice.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the memory region is still valid and that there are no
+    /// concurrent mutable accesses.
     pub unsafe fn as_slice(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts((*self.mr).addr as *const u8, (*self.mr).length) }
     }
 
+    /// Returns the memory region as a mutable slice.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the memory region is still valid and that there are no
+    /// concurrent accesses.
     pub unsafe fn as_mut_slice(&self) -> &mut [u8] {
         unsafe { std::slice::from_raw_parts_mut((*self.mr).addr as *mut u8, (*self.mr).length) }
     }
