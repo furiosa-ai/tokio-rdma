@@ -125,6 +125,12 @@ impl CmId {
         })
     }
 
+    /// Creates a CmId from a raw pointer.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `id` is a valid pointer to a `rdma_cm_id` and that it stays valid
+    /// for the lifetime of the returned `CmId`.
     pub unsafe fn from_raw(id: *mut rdma_cm_id, channel: Option<Arc<CmEventChannel>>) -> Self {
         Self {
             id,
