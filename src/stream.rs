@@ -123,14 +123,16 @@ impl RdmaStream {
         // Default CQ size 16 for now
         let cq = CompletionQueue::new(device.clone(), 16)?;
 
-        let qp = QueuePair::new_cm(
-            pd.clone(),
-            id.id,
-            QpInitAttr {
-                send_cq: cq.clone(),
-                recv_cq: cq.clone(),
-            },
-        )?;
+        let qp = unsafe {
+            QueuePair::new_cm(
+                pd.clone(),
+                id.id,
+                QpInitAttr {
+                    send_cq: cq.clone(),
+                    recv_cq: cq.clone(),
+                },
+            )
+        }?;
 
         // 5. Connect
         tracing::debug!("Establishing connection...");
@@ -177,7 +179,7 @@ impl RdmaStream {
         qp: Arc<QueuePair>,
         wr_id: &mut u64,
     ) {
-        *wr_id = *wr_id + 1;
+        *wr_id += 1;
         match req {
             Request::Send(tx, requests) => {
                 let reqs: Vec<_> = requests
@@ -443,14 +445,16 @@ impl RdmaListener {
                 let pd = ProtectionDomain::new(device.clone())?;
                 let cq = CompletionQueue::new(device.clone(), 16)?;
 
-                let qp = QueuePair::new_cm(
-                    pd.clone(),
-                    client_id.id,
-                    QpInitAttr {
-                        send_cq: cq.clone(),
-                        recv_cq: cq.clone(),
-                    },
-                )?;
+                let qp = unsafe {
+                    QueuePair::new_cm(
+                        pd.clone(),
+                        client_id.id,
+                        QpInitAttr {
+                            send_cq: cq.clone(),
+                            recv_cq: cq.clone(),
+                        },
+                    )
+                }?;
 
                 // Accept
                 tracing::debug!("Accepting connection...");

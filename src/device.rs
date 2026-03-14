@@ -31,10 +31,8 @@ impl DeviceList {
 
     pub fn find_by_name(&self, name: &str) -> Option<Device> {
         for i in 0..self.count as usize {
-            if let Some(dev) = self.get(i) {
-                if dev.name() == name {
-                    return Some(dev);
-                }
+            if let Some(dev) = self.get(i).filter(|d| d.name() == name) {
+                return Some(dev);
             }
         }
         None

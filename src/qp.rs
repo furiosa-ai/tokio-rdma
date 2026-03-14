@@ -29,7 +29,7 @@ impl QueuePair {
     ///
     /// The caller must ensure that `cm_id` is a valid pointer to a `rdma_cm_id` and that it stays
     /// valid for the duration of this call.
-    pub fn new_cm(
+    pub unsafe fn new_cm(
         pd: Arc<ProtectionDomain>,
         cm_id: *mut rdma_cm_id,
         init_attr: QpInitAttr,

@@ -104,14 +104,7 @@ impl MemoryRegion {
         mut data: Vec<u8>,
         access: i32,
     ) -> Result<Arc<Self>> {
-        let mr = unsafe {
-            ibv_reg_mr(
-                pd.pd,
-                data.as_mut_ptr() as *mut c_void,
-                data.len(),
-                access as i32,
-            )
-        };
+        let mr = unsafe { ibv_reg_mr(pd.pd, data.as_mut_ptr() as *mut c_void, data.len(), access) };
 
         if mr.is_null() {
             let errno = unsafe { *libc::__errno_location() };
@@ -157,12 +150,16 @@ impl MemoryRegion {
     ///
     /// The caller must ensure that the memory region is still valid and that there are no
     /// concurrent accesses.
-    pub unsafe fn as_mut_slice(&self) -> &mut [u8] {
+    pub unsafe fn as_mut_slice(&mut self) -> &mut [u8] {
         unsafe { std::slice::from_raw_parts_mut((*self.mr).addr as *mut u8, (*self.mr).length) }
     }
 
     pub fn len(&self) -> usize {
-        unsafe { *self.mr }.length
+        unsafe { (*self.mr).length }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     pub fn data(&self) -> Result<Vec<u8>> {
