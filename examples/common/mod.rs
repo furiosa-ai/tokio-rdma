@@ -30,9 +30,9 @@ pub fn create_npu_dmabuf(
 ) -> anyhow::Result<DmaBuf> {
     let file = OpenOptions::new().read(true).write(true).open(path)?;
 
-    let npu_default_offset = 256u64 << 20;
+    const NPU_DEFAULT_OFFSET: u64 = 256 << 20;
     let mut region = NpuDmabufRegion {
-        offset: offset + npu_default_offset,
+        offset: offset + NPU_DEFAULT_OFFSET,
         size: size as u64,
         fd: -1,
     };
@@ -52,7 +52,7 @@ pub fn create_mr(stream: &RdmaStream, args: &Args) -> Result<Arc<MemoryRegion>> 
 
     // Pre-export dmabuf if needed
     if let Some(path) = &args.dmabuf_dev {
-        let dmabuf = create_npu_dmabuf(&path, args.dmabuf_offset, args.buffer_size).unwrap();
+        let dmabuf = create_npu_dmabuf(path, args.dmabuf_offset, args.buffer_size).unwrap();
         stream.register_dmabuf_mr(dmabuf, 0, access as i32)
     } else {
         println!("Using Host Memory");
