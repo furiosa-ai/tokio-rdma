@@ -30,69 +30,61 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tokio-rdma = { path = "." } # Or git url once published
+tokio-rdma = "0.1"
 tokio = { version = "1", features = ["full"] }
 ```
 
 ## Usage
 
-### 1. RDMA Connection Manager (Recommended)
+### 1. High-level Async Stream (Recommended)
 
-This example shows how to establish a connection using the RDMA CM (Client side).
+This example shows how to establish a connection using the high-level `RdmaBuilder` and `RdmaListener`.
 
+**Client:**
 ```rust
-use std::sync::Arc;
-use tokio_rdma::{CmEventChannel, CmId, Device, ProtectionDomain, CompletionQueue, QueuePair, MemoryRegion, QpInitAttr};
+use tokio_rdma::RdmaBuilder;
+use std::net::SocketAddr;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // 1. Create Event Channel and ID
-    let channel = Arc::new(CmEventChannel::new()?);
-    let id = CmId::new(channel.clone())?;
-
-    // 2. Resolve Address and Route
-    let addr = "127.0.0.1:8080".parse()?;
-    id.resolve_addr(addr)?;
-    let _ = channel.get_event().await?; // Expect ADDR_RESOLVED
-    id.resolve_route()?;
-    let _ = channel.get_event().await?; // Expect ROUTE_RESOLVED
-
-    // 3. Create Resources (PD, CQ, QP)
-    let verbs = id.context();
-    let device = Arc::new(Device { raw: std::ptr::null_mut(), context: verbs });
-    let pd = ProtectionDomain::new(device.clone())?;
-    let cq = CompletionQueue::new(device.clone(), 10)?;
+    let addr: SocketAddr = "127.0.0.1:8080".parse()?;
+    let stream = RdmaBuilder::new().connect(addr).await?;
     
-    let qp = QueuePair::new_cm(pd.clone(), id.id, QpInitAttr {
-        send_cq: cq.clone(), 
-        recv_cq: cq.clone()
-    })?;
-
-    // 4. Register Memory and Connect
-    let mr = MemoryRegion::register(pd.clone(), 1024)?;
-    id.connect()?;
-    let _ = channel.get_event().await?; // Expect ESTABLISHED
-
-    // 5. Post Send
-    unsafe { qp.post_send(&mr, 0, 11, 1, true)?; }
-    let wc = cq.poll().await?;
+    let data = vec![77u8; 1024];
+    let mr = stream.register_mr(data, 1)?; // local write access
     
+    stream.send(mr.clone(), 0, 1024).await?;
     Ok(())
 }
 ```
 
-### 2. Manual Connection (TCP OOB)
+**Server:**
+```rust
+use tokio_rdma::RdmaListener;
+use std::net::SocketAddr;
 
-You can also exchange QP/LID information manually via TCP (Out-of-Band) and transition QP states (`INIT` -> `RTR` -> `RTS`) manually. See `examples/client.rs` and `examples/server.rs`.
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let addr: SocketAddr = "127.0.0.1:8080".parse()?;
+    let listener = RdmaListener::bind(addr).await?;
+    
+    let stream = listener.accept().await?;
+    let data = vec![0u8; 1024];
+    let mr = stream.register_mr(data, 1)?;
+    
+    stream.recv(mr.clone(), 0, 1024).await?;
+    Ok(())
+}
+```
 
 ## Examples
 
-The `examples/` directory contains several complete examples:
+The `examples/` directory contains complete examples for both client and server:
 
-*   **Basic Send/Recv**: `client.rs` / `server.rs` (Uses TCP for OOB exchange).
-*   **RDMA CM**: `cm_client.rs` / `cm_server.rs` (Uses `rdma-core`).
-*   **DMABUF (NPU/GPU)**: `dmabuf_rdma.rs` (Exports DMABUF from a device and registers it).
-*   **P2P Memory**: `p2p_cm_client.rs` (Maps PCI BAR memory and registers it).
+*   **Simple Client**: `simple_client.rs`
+*   **Simple Server**: `simple_server.rs`
+
+These examples support both Host memory and DMABUF (NPU/GPU) memory registration.
 
 ### Running Examples
 
@@ -100,20 +92,10 @@ The `examples/` directory contains several complete examples:
 
 ```bash
 # Terminal 1
-cargo run --example server
+cargo run --example simple_server
 
 # Terminal 2
-cargo run --example client
-```
-
-**2. Connection Manager (CM):**
-
-```bash
-# Terminal 1
-cargo run --example cm_server
-
-# Terminal 2
-cargo run --example cm_client
+cargo run --example simple_client
 ```
 
 ## License
