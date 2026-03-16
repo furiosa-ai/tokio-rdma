@@ -19,9 +19,20 @@
 
 You need the RDMA userspace libraries installed on your system.
 
+### Option 1: Install from Package Manager (Recommended)
+
 On Ubuntu/Debian:
 ```bash
 sudo apt-get install rdma-core libibverbs-dev librdmacm-dev
+```
+
+### Option 2: Build from Source
+
+You can use the provided utility scripts to clone and build `rdma-core` manually:
+
+```bash
+# This will clone and build rdma-core in the project root
+./scripts/setup_rdma_core.sh
 ```
 
 ## Installation
