@@ -28,11 +28,17 @@ sudo apt-get install rdma-core libibverbs-dev librdmacm-dev
 
 ### Option 2: Build from Source
 
-You can use the provided utility scripts to clone and build `rdma-core` manually:
+You can use the provided utility script to clone and build `rdma-core` manually:
 
 ```bash
 # This will clone and build rdma-core in the project root
 ./scripts/setup_rdma_core.sh
+```
+
+If you choose this option, the build system is already configured to use the libraries from the `rdma-core/` directory via `.cargo/config.toml`. However, to run the resulting binaries, you must set `LD_LIBRARY_PATH`:
+
+```bash
+export LD_LIBRARY_PATH=$PWD/rdma-core/build/lib:$LD_LIBRARY_PATH
 ```
 
 ## Installation
