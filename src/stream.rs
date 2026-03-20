@@ -5,11 +5,14 @@ use crate::device::Device;
 use crate::error::{RdmaError, Result};
 use crate::pd::ProtectionDomain;
 use crate::qp::{QpInitAttr, QueuePair};
+use parking_lot::Mutex;
 use rdma_sys::{ibv_wc, rdma_cm_event_type};
-use std::collections::HashMap;
+use slab::Slab;
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::oneshot;
+use std::task::{Context, Poll, Waker};
 use tokio::task::JoinHandle;
 
 #[derive(Debug)]
@@ -17,27 +20,32 @@ pub struct WorkCompletion {
     pub wc: rdma_sys::ibv_wc,
 }
 
-pub enum Request {
-    Send(
-        oneshot::Sender<Result<ibv_wc>>,
-        Vec<(Arc<MemoryRegion>, u64, u32)>,
-    ),
-    Recv(
-        oneshot::Sender<Result<ibv_wc>>,
-        Vec<(Arc<MemoryRegion>, u64, u32)>,
-    ),
-    Read(
-        oneshot::Sender<Result<ibv_wc>>,
-        Vec<(Arc<MemoryRegion>, u64, u32)>,
-        u64, // remote_addr
-        u32, // rkey
-    ),
-    Write(
-        oneshot::Sender<Result<ibv_wc>>,
-        Vec<(Arc<MemoryRegion>, u64, u32)>,
-        u64, // remote_addr
-        u32, // rkey
-    ),
+pub(crate) struct WakerState {
+    pub waker: Option<Waker>,
+    pub result: Option<Result<ibv_wc>>,
+}
+
+pub(crate) type SharedState = Arc<Mutex<Slab<WakerState>>>;
+
+pub struct RdmaFuture {
+    shared: SharedState,
+    wr_id: usize,
+}
+
+impl Future for RdmaFuture {
+    type Output = Result<WorkCompletion>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut state = self.shared.lock();
+        let entry = state.get_mut(self.wr_id).expect("Invalid wr_id");
+        if let Some(res) = entry.result.take() {
+            state.remove(self.wr_id);
+            Poll::Ready(res.map(|wc| WorkCompletion { wc }))
+        } else {
+            entry.waker = Some(cx.waker().clone());
+            Poll::Pending
+        }
+    }
 }
 
 pub struct RdmaStream {
@@ -46,7 +54,7 @@ pub struct RdmaStream {
     pub pd: Arc<ProtectionDomain>,
     pub cq: Arc<CompletionQueue>,
     poller_handle: JoinHandle<()>,
-    tx: tokio::sync::mpsc::Sender<Request>,
+    shared: SharedState,
 }
 
 impl Drop for RdmaStream {
@@ -145,15 +153,16 @@ impl RdmaStream {
             )));
         }
         tracing::debug!("Connection established");
-        let (tx, rx) = tokio::sync::mpsc::channel(128);
-        let poller_handle = Self::spawn_cq_poller(cq.clone(), rx, qp.clone());
+        
+        let shared = Arc::new(Mutex::new(Slab::new()));
+        let poller_handle = Self::spawn_cq_poller(cq.clone(), shared.clone());
         Ok(Self {
             id,
             qp,
             pd,
             cq,
             poller_handle,
-            tx,
+            shared,
         })
     }
 
@@ -161,121 +170,29 @@ impl RdmaStream {
         Self::connect_internal(None, addr).await
     }
 
-    fn handle_completion(works: &mut HashMap<u64, oneshot::Sender<Result<ibv_wc>>>, wc: ibv_wc) {
-        if let Some(tx) = works.remove(&wc.wr_id) {
-            // Send the completion to the waiting task
-            let _ = tx.send(Ok(wc));
-        } else {
-            // This might happen if the sender was dropped or cancelled
-            // or if we have a spurious completion.
-            // For now, we just ignore it.
-            tracing::warn!("no wc entry for {wc:?}");
-        }
-    }
-
-    fn handle_request(
-        req: Request,
-        works: &mut HashMap<u64, oneshot::Sender<Result<ibv_wc>>>,
-        qp: Arc<QueuePair>,
-        wr_id: &mut u64,
-    ) {
-        *wr_id += 1;
-        match req {
-            Request::Send(tx, requests) => {
-                let reqs: Vec<_> = requests
-                    .iter()
-                    .map(|(mr, offset, len)| (mr.as_ref(), *offset, *len))
-                    .collect();
-
-                if let Err(e) = unsafe { qp.post_send_multi(reqs, *wr_id, true) } {
-                    tx.send(Err(e)).unwrap();
-                } else {
-                    works.insert(*wr_id, tx);
-                }
-            }
-            Request::Recv(tx, requests) => {
-                let reqs: Vec<_> = requests
-                    .iter()
-                    .map(|(mr, offset, len)| (mr.as_ref(), *offset, *len))
-                    .collect();
-
-                if let Err(e) = unsafe { qp.post_recv_multi(reqs, *wr_id) } {
-                    tx.send(Err(e)).unwrap();
-                } else {
-                    works.insert(*wr_id, tx);
-                }
-            }
-            Request::Read(tx, requests, remote_addr, rkey) => {
-                let reqs: Vec<_> = requests
-                    .iter()
-                    .map(|(mr, offset, len)| (mr.as_ref(), *offset, *len))
-                    .collect();
-
-                if let Err(e) = unsafe {
-                    qp.post_rdma(
-                        reqs,
-                        rdma_sys::ibv_wr_opcode::IBV_WR_RDMA_READ,
-                        *wr_id,
-                        true,
-                        remote_addr,
-                        rkey,
-                    )
-                } {
-                    tx.send(Err(e)).unwrap();
-                } else {
-                    works.insert(*wr_id, tx);
-                }
-            }
-            Request::Write(tx, requests, remote_addr, rkey) => {
-                let reqs: Vec<_> = requests
-                    .iter()
-                    .map(|(mr, offset, len)| (mr.as_ref(), *offset, *len))
-                    .collect();
-
-                if let Err(e) = unsafe {
-                    qp.post_rdma(
-                        reqs,
-                        rdma_sys::ibv_wr_opcode::IBV_WR_RDMA_WRITE,
-                        *wr_id,
-                        true,
-                        remote_addr,
-                        rkey,
-                    )
-                } {
-                    tx.send(Err(e)).unwrap();
-                } else {
-                    works.insert(*wr_id, tx);
-                }
-            }
-        }
-    }
-
     /// Helper to spawn the background polling task
     fn spawn_cq_poller(
         cq: Arc<CompletionQueue>,
-        mut request_receiver: tokio::sync::mpsc::Receiver<Request>,
-        qp: Arc<QueuePair>,
+        shared: SharedState,
     ) -> JoinHandle<()> {
         tokio::task::spawn(async move {
-            let mut wr_id = 0u64;
-            let mut works = HashMap::new();
             loop {
-                tokio::select! {
-                    maybe_request = request_receiver.recv() => {
-                        match maybe_request {
-                            Some(req) => Self::handle_request(req, &mut works, qp.clone(), &mut wr_id),
-                            None => break,
-                        }
-                    },
-                    maybe_wc = cq.poll() =>
-                    {
-                        match maybe_wc {
-                            Ok(wc) => Self::handle_completion(&mut works, wc),
-                            Err(_e) => {
-                                // Polling failed, likely CQ destroyed or device error
-                                break;
+                match cq.poll().await {
+                    Ok(wc) => {
+                        let wr_id = wc.wr_id as usize;
+                        let mut state = shared.lock();
+                        if let Some(entry) = state.get_mut(wr_id) {
+                            entry.result = Some(Ok(wc));
+                            if let Some(waker) = entry.waker.take() {
+                                waker.wake();
                             }
+                        } else {
+                            tracing::warn!("no wc entry for {wc:?}");
                         }
+                    }
+                    Err(_e) => {
+                        // Polling failed, likely CQ destroyed or device error
+                        break;
                     }
                 }
             }
@@ -286,23 +203,54 @@ impl RdmaStream {
         &self,
         requests: Vec<(Arc<MemoryRegion>, u64, u32)>,
     ) -> Result<WorkCompletion> {
-        let (tx, rx) = oneshot::channel();
-        self.tx.send(Request::Send(tx, requests)).await?;
-        let wc = rx.await??;
-        Ok(WorkCompletion { wc })
+        let wr_id = {
+            let mut state = self.shared.lock();
+            state.insert(WakerState { waker: None, result: None })
+        };
+
+        let reqs: Vec<_> = requests
+            .iter()
+            .map(|(mr, offset, len)| (mr.as_ref(), *offset, *len))
+            .collect();
+
+        if let Err(e) = unsafe { self.qp.post_send_multi(reqs, wr_id as u64, true) } {
+            let mut state = self.shared.lock();
+            state.remove(wr_id);
+            return Err(e);
+        }
+
+        RdmaFuture {
+            shared: self.shared.clone(),
+            wr_id,
+        }
+        .await
     }
 
     pub async fn recv_multi(
         &self,
         requests: Vec<(Arc<MemoryRegion>, u64, u32)>,
     ) -> Result<WorkCompletion> {
-        let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(Request::Recv(tx, requests))
-            .await
-            .map_err(|_| RdmaError::Rdma("Stream poller task is closed".to_string()))?;
-        let wc = rx.await??;
-        Ok(WorkCompletion { wc })
+        let wr_id = {
+            let mut state = self.shared.lock();
+            state.insert(WakerState { waker: None, result: None })
+        };
+
+        let reqs: Vec<_> = requests
+            .iter()
+            .map(|(mr, offset, len)| (mr.as_ref(), *offset, *len))
+            .collect();
+
+        if let Err(e) = unsafe { self.qp.post_recv_multi(reqs, wr_id as u64) } {
+            let mut state = self.shared.lock();
+            state.remove(wr_id);
+            return Err(e);
+        }
+
+        RdmaFuture {
+            shared: self.shared.clone(),
+            wr_id,
+        }
+        .await
     }
 
     pub async fn send(
@@ -311,13 +259,7 @@ impl RdmaStream {
         offset: u64,
         len: u32,
     ) -> Result<WorkCompletion> {
-        let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(Request::Send(tx, vec![(mr, offset, len)]))
-            .await
-            .map_err(|_| RdmaError::Rdma("Stream poller task is closed".to_string()))?;
-        let wc = rx.await??;
-        Ok(WorkCompletion { wc })
+        self.send_multi(vec![(mr, offset, len)]).await
     }
 
     pub async fn recv(
@@ -326,13 +268,7 @@ impl RdmaStream {
         offset: u64,
         len: u32,
     ) -> Result<WorkCompletion> {
-        let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(Request::Recv(tx, vec![(mr, offset, len)]))
-            .await
-            .map_err(|_| RdmaError::Rdma("Stream poller task is closed".to_string()))?;
-        let wc = rx.await??;
-        Ok(WorkCompletion { wc })
+        self.recv_multi(vec![(mr, offset, len)]).await
     }
 
     pub async fn read(
@@ -343,17 +279,33 @@ impl RdmaStream {
         remote_addr: u64,
         rkey: u32,
     ) -> Result<WorkCompletion> {
-        let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(Request::Read(
-                tx,
-                vec![(mr, offset, len)],
+        let wr_id = {
+            let mut state = self.shared.lock();
+            state.insert(WakerState { waker: None, result: None })
+        };
+
+        let req = vec![(mr.as_ref(), offset, len)];
+
+        if let Err(e) = unsafe {
+            self.qp.post_rdma(
+                req,
+                rdma_sys::ibv_wr_opcode::IBV_WR_RDMA_READ,
+                wr_id as u64,
+                true,
                 remote_addr,
                 rkey,
-            ))
-            .await?;
-        let wc = rx.await??;
-        Ok(WorkCompletion { wc })
+            )
+        } {
+            let mut state = self.shared.lock();
+            state.remove(wr_id);
+            return Err(e);
+        }
+
+        RdmaFuture {
+            shared: self.shared.clone(),
+            wr_id,
+        }
+        .await
     }
 
     pub async fn write(
@@ -364,18 +316,33 @@ impl RdmaStream {
         remote_addr: u64,
         rkey: u32,
     ) -> Result<WorkCompletion> {
-        let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(Request::Write(
-                tx,
-                vec![(mr, offset, len)],
+        let wr_id = {
+            let mut state = self.shared.lock();
+            state.insert(WakerState { waker: None, result: None })
+        };
+
+        let req = vec![(mr.as_ref(), offset, len)];
+
+        if let Err(e) = unsafe {
+            self.qp.post_rdma(
+                req,
+                rdma_sys::ibv_wr_opcode::IBV_WR_RDMA_WRITE,
+                wr_id as u64,
+                true,
                 remote_addr,
                 rkey,
-            ))
-            .await
-            .map_err(|_| RdmaError::Rdma("Stream poller task is closed".to_string()))?;
-        let wc = rx.await??;
-        Ok(WorkCompletion { wc })
+            )
+        } {
+            let mut state = self.shared.lock();
+            state.remove(wr_id);
+            return Err(e);
+        }
+
+        RdmaFuture {
+            shared: self.shared.clone(),
+            wr_id,
+        }
+        .await
     }
 
     pub fn register_mr(&self, data: Vec<u8>, access: i32) -> Result<Arc<MemoryRegion>> {
@@ -471,10 +438,11 @@ impl RdmaListener {
                     )));
                 }
                 tracing::debug!("Connection established (server side)");
-                let (tx, rx) = tokio::sync::mpsc::channel(128);
+                
+                let shared = Arc::new(Mutex::new(Slab::new()));
 
                 // Start the background poller for the accepted connection
-                let poller_handle = RdmaStream::spawn_cq_poller(cq.clone(), rx, qp.clone());
+                let poller_handle = RdmaStream::spawn_cq_poller(cq.clone(), shared.clone());
 
                 return Ok(RdmaStream {
                     id: client_id,
@@ -482,7 +450,7 @@ impl RdmaListener {
                     pd,
                     cq,
                     poller_handle,
-                    tx,
+                    shared,
                 });
             }
         }

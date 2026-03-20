@@ -11,10 +11,6 @@ pub enum RdmaError {
     DeviceNotFound,
     #[error("Operation failed")]
     OperationFailed,
-    #[error("Tokio Error: {0}")]
-    TokioOneshotRecvError(#[from] tokio::sync::oneshot::error::RecvError),
-    #[error("Tokio Error: {0}")]
-    TokioSendError(#[from] tokio::sync::mpsc::error::SendError<crate::stream::Request>),
 }
 
 pub type Result<T> = std::result::Result<T, RdmaError>;

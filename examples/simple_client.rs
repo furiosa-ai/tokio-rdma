@@ -79,7 +79,7 @@ async fn main() -> anyhow::Result<()> {
         if latency > max_latency {
             max_latency = latency;
         }
-        println!("Write completed in {:?}: {:?}", latency, wc);
+        // println!("Write completed in {:?}: {:?}", latency, wc);
     }
 
     let elapsed = now.elapsed();
