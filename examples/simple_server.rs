@@ -21,16 +21,34 @@ async fn main() -> anyhow::Result<()> {
         let mr = common::create_mr(&stream, &args)?;
         println!("registered mr {mr:?}");
 
-        let len = mr.len();
+        // Register MR for sending metadata to client
+        let mut meta_data = vec![0u8; 16];
+        meta_data[0..8].copy_from_slice(&mr.addr().to_le_bytes());
+        meta_data[8..12].copy_from_slice(&mr.rkey().to_le_bytes());
+        let meta_mr = stream.register_mr(
+            meta_data,
+            rdma_sys::ibv_access_flags::IBV_ACCESS_LOCAL_WRITE.0 as i32,
+        )?;
 
-        let futures = (0..args.count).map(|_| stream.recv(mr.clone(), 0, len as u32));
-        let results = futures::future::join_all(futures).await;
+        // Register MR for syncing with client
+        let sync_mr = stream.register_mr(
+            vec![0u8; 1],
+            rdma_sys::ibv_access_flags::IBV_ACCESS_LOCAL_WRITE.0 as i32,
+        )?;
 
-        for result in results {
-            let wc = result?;
-            println!("Recv completed: {wc:?}");
-        }
+        println!("Waiting for client ready signal...");
+        // Wait for client to be ready to receive metadata
+        stream.recv(sync_mr.clone(), 0, 1).await?;
 
+        println!("Sending metadata to client...");
+        // Send metadata
+        stream.send(meta_mr.clone(), 0, 16).await?;
+
+        println!("Waiting for client to finish writing...");
+        // Wait for client to finish RDMA writes
+        stream.recv(sync_mr.clone(), 0, 1).await?;
+
+        println!("Write operations from client completed!");
         // let data = mr.data().unwrap();
         // println!("{data:?}");
     }
