@@ -55,24 +55,45 @@ async fn main() -> anyhow::Result<()> {
     let now = std::time::Instant::now();
 
     println!("Performing {} RDMA writes...", args.count);
-    let futures =
-        (0..args.count).map(|_| stream.write(mr.clone(), 0, len as u32, remote_addr, rkey));
+    let futures = (0..args.count).map(|_| async {
+        let start = std::time::Instant::now();
+        let res = stream
+            .write(mr.clone(), 0, len as u32, remote_addr, rkey)
+            .await;
+        (res, start.elapsed())
+    });
 
     let results = futures::future::join_all(futures).await;
     let mut total_bytes = 0u64;
-    for result in results {
+    let mut total_latency = std::time::Duration::ZERO;
+    let mut min_latency = std::time::Duration::MAX;
+    let mut max_latency = std::time::Duration::ZERO;
+
+    for (result, latency) in results {
         let wc = result?;
         total_bytes += len as u64;
-        println!("Write completed: {wc:?}");
+        total_latency += latency;
+        if latency < min_latency {
+            min_latency = latency;
+        }
+        if latency > max_latency {
+            max_latency = latency;
+        }
+        println!("Write completed in {:?}: {:?}", latency, wc);
     }
 
     let elapsed = now.elapsed();
+    let avg_latency = total_latency / args.count as u32;
     let bw = total_bytes as f64 / elapsed.as_nanos() as f64;
     println!(
         "transfered {} bytes for {}ms {}GiB/s",
         total_bytes,
         elapsed.as_millis(),
         bw
+    );
+    println!(
+        "Latency - min: {:?}, max: {:?}, avg: {:?}",
+        min_latency, max_latency, avg_latency
     );
 
     println!("Telling server we are done...");
